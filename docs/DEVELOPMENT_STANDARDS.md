@@ -17,7 +17,8 @@ These standards govern all code, configuration, documentation, tests, and automa
 - UTF-8 text files.
 - LF line endings in the repository.
 - Final newline required.
-- No trailing whitespace.
+- No trailing whitespace in newly created or ordinarily editable files.
+- Hash-pinned authoritative artifacts may retain pre-existing formatting that would otherwise violate a style rule; changing those bytes requires an explicit authority revision and corresponding hash update.
 - Markdown headings should be hierarchical and stable enough for machine parsing.
 - JSON committed as project/config/state data must parse with the standard JSON grammar; comments are not allowed in JSON authority files.
 
