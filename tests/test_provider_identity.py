@@ -30,9 +30,7 @@ class ProviderIdentityTests(unittest.TestCase):
         registry = ProviderRegistry()
         registry.register(self.identity())
         with self.assertRaises(ProviderIdentityError):
-            registry.register(
-                ProviderIdentity("openai", "Different", "different.example")
-            )
+            registry.register(ProviderIdentity("openai", "Different", "different.example"))
 
     def test_health_and_quota_are_independent_of_identity(self) -> None:
         registry = ProviderRegistry()
@@ -60,12 +58,8 @@ class ProviderIdentityTests(unittest.TestCase):
         registry.attach_route("openai", "openrouter-openai")
 
         registration = registry.get("openai")
-        self.assertEqual(
-            frozenset({"gpt-codex-a", "gpt-codex-b"}), registration.model_ids
-        )
-        self.assertEqual(
-            frozenset({"openai-direct", "openrouter-openai"}), registration.route_ids
-        )
+        self.assertEqual(frozenset({"gpt-codex-a", "gpt-codex-b"}), registration.model_ids)
+        self.assertEqual(frozenset({"openai-direct", "openrouter-openai"}), registration.route_ids)
 
     def test_quota_fraction_is_bounded(self) -> None:
         with self.assertRaises(ProviderIdentityError):

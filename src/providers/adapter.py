@@ -5,17 +5,16 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, Generic, TypeVar
+from typing import Any
 
+from src.providers.errors import ProviderError, ProviderErrorCode
 from src.providers.identity import (
     ProviderIdentity,
     ProviderOperationalState,
     ProviderQuotaState,
 )
-
-RequestT = TypeVar("RequestT")
-ResponseT = TypeVar("ResponseT")
-StreamEventT = TypeVar("StreamEventT")
+from src.providers.request import ProviderRequest
+from src.providers.response import ProviderResponse
 
 
 @dataclass(frozen=True)
@@ -26,12 +25,11 @@ class ProviderAdapterCapabilities:
     cancellation: bool = True
 
 
-class ProviderAdapter(ABC, Generic[RequestT, ResponseT, StreamEventT]):
+class ProviderAdapter(ABC):
     """Stable orchestration-facing provider contract.
 
-    Concrete adapters translate the normalized OmniForge request/response models
-    introduced by later roadmap steps into provider-specific APIs. Core
-    orchestration depends only on this interface.
+    Concrete adapters translate normalized OmniForge request/response models into
+    provider-specific APIs. Core orchestration depends only on this interface.
     """
 
     @property
@@ -45,14 +43,14 @@ class ProviderAdapter(ABC, Generic[RequestT, ResponseT, StreamEventT]):
         """Features the adapter can expose reliably."""
 
     @abstractmethod
-    async def submit(self, request: RequestT) -> ResponseT:
+    async def submit(self, request: ProviderRequest) -> ProviderResponse:
         """Submit one complete request and return one normalized response."""
 
     @abstractmethod
-    async def stream(self, request: RequestT) -> AsyncIterator[StreamEventT]:
-        """Stream normalized events for one request when supported."""
+    async def stream(self, request: ProviderRequest) -> AsyncIterator[ProviderResponse]:
+        """Stream normalized response chunks for one request when supported."""
         if False:
-            yield None  # type: ignore[misc]
+            yield None
 
     @abstractmethod
     async def cancel(self, request_id: str) -> None:
@@ -68,6 +66,45 @@ class ProviderAdapter(ABC, Generic[RequestT, ResponseT, StreamEventT]):
 
     async def close(self) -> None:
         """Optional lifecycle hook for transports or sessions."""
+        return None
+
+    def translate_error(self, raw_error: Any) -> ProviderError:
+        """Translate a raw provider error into the normalized taxonomy."""
+        return ProviderError(
+            code=ProviderErrorCode.UNKNOWN,
+            message=str(raw_error),
+            provider_id=self.identity,
+        )
+
+    def can_serve(self, request: ProviderRequest) -> tuple[bool, ProviderError | None]:
+        """Validate that this adapter can serve the request without provider specifics.
+
+        Returns (True, None) if eligible, or (False, error) if a required
+        capability is unsupported.
+        """
+        caps = self.capabilities
+        if request.requires_streaming() and not caps.streaming:
+            return False, ProviderError(
+                code=ProviderErrorCode.UNSUPPORTED_CAPABILITY,
+                message="Streaming is required but unsupported by this adapter",
+                provider_id=self.identity,
+                route_id=request.target_route,
+            )
+        if request.requires_tools() and not caps.tool_calls:
+            return False, ProviderError(
+                code=ProviderErrorCode.UNSUPPORTED_CAPABILITY,
+                message="Tool use is required but unsupported by this adapter",
+                provider_id=self.identity,
+                route_id=request.target_route,
+            )
+        if request.requires_structured_output() and not caps.structured_output:
+            return False, ProviderError(
+                code=ProviderErrorCode.UNSUPPORTED_CAPABILITY,
+                message="Structured output is required but unsupported by this adapter",
+                provider_id=self.identity,
+                route_id=request.target_route,
+            )
+        return True, None
 
 
 @dataclass(frozen=True)
@@ -79,7 +116,7 @@ class AdapterContractSnapshot:
     cancellation: bool
 
 
-def inspect_adapter(adapter: ProviderAdapter[Any, Any, Any]) -> AdapterContractSnapshot:
+def inspect_adapter(adapter: ProviderAdapter) -> AdapterContractSnapshot:
     """Expose a small deterministic contract snapshot for diagnostics/tests."""
 
     capabilities = adapter.capabilities

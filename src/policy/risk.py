@@ -40,7 +40,7 @@ class RiskAssessment:
         if any(not reason.strip() for reason in self.reasons):
             raise ValueError("risk reasons must be non-empty strings")
 
-    def escalate(self, target: RiskLevel, reason: str) -> "RiskAssessment":
+    def escalate(self, target: RiskLevel, reason: str) -> RiskAssessment:
         """Increase risk only; a runtime event cannot silently lower risk."""
 
         if not reason.strip():

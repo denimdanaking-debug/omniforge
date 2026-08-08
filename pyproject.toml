@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omniforge"
+version = "0.1.0"
+description = "Provider-agnostic, self-optimizing AI software factory"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.6.0",
+    "mypy>=1.11.0",
+    "build>=1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+namespaces = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra --strict-markers"
+pythonpath = ["."]
+markers = [
+    "contract: provider adapter contract tests",
+    "architecture: architectural enforcement tests",
+    "authority: authority file validation tests",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "N",
+    "W",
+    "UP",
+    "B",
+    "C4",
+    "SIM",
+]
+ignore = []
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"src/orchestration/project_contract.py" = ["N818", "E501"]
+"src/persistence/configuration.py" = ["N818", "E501"]
+"src/persistence/runtime_state.py" = ["N818", "E501"]
+"src/telemetry/outcomes.py" = ["E501"]
+"tests/test_inference_route.py" = ["I001"]
+"tests/test_risk_policy.py" = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = ["."]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+disallow_any_generics = false
+disable_error_code = ["no-untyped-call"]

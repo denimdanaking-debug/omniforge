@@ -74,7 +74,9 @@ def _require_version(state: Mapping[str, Any]) -> str:
     version = state.get("schema_version")
     if not isinstance(version, str) or not version.strip():
         raise CorruptRuntimeState(
-            RuntimeStateDiagnostic("MISSING_SCHEMA_VERSION", "runtime state requires schema_version")
+            RuntimeStateDiagnostic(
+                "MISSING_SCHEMA_VERSION", "runtime state requires schema_version"
+            )
         )
     return version
 
@@ -122,7 +124,9 @@ def validate_runtime_state(state: Mapping[str, Any]) -> dict[str, Any]:
 
     run_id = working.get("run_id")
     if not isinstance(run_id, str) or not run_id:
-        raise CorruptRuntimeState(RuntimeStateDiagnostic("INVALID_RUN_ID", "runtime state requires run_id"))
+        raise CorruptRuntimeState(
+            RuntimeStateDiagnostic("INVALID_RUN_ID", "runtime state requires run_id")
+        )
 
     workflow_state = working.get("workflow_state")
     if workflow_state not in ALLOWED_WORKFLOW_STATES:
@@ -163,7 +167,9 @@ def load_runtime_state(path: str | Path) -> dict[str, Any]:
 
     if not isinstance(raw, dict):
         raise CorruptRuntimeState(
-            RuntimeStateDiagnostic("INVALID_ROOT", "runtime state root must be an object", str(source))
+            RuntimeStateDiagnostic(
+                "INVALID_ROOT", "runtime state root must be an object", str(source)
+            )
         )
 
     try:

@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 PROJECT_CONTRACT_SCHEMA_VERSION = "1.0.0"
 
@@ -77,8 +78,10 @@ def load_project_contract(raw: Mapping[str, Any]) -> ProjectContract:
         values[field] = value
 
     profile = raw.get("validation_profile")
-    if not isinstance(profile, list) or not profile or not all(
-        isinstance(command, str) and command.strip() for command in profile
+    if (
+        not isinstance(profile, list)
+        or not profile
+        or not all(isinstance(command, str) and command.strip() for command in profile)
     ):
         raise ProjectContractError("validation_profile must contain at least one non-empty command")
 

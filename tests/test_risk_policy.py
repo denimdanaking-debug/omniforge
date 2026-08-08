@@ -52,7 +52,9 @@ class RiskPolicyTests(unittest.TestCase):
         self.assertFalse(lifecycle_eligible(ModelLifecycle.LOW_RISK, RiskLevel.R2_NORMAL))
         self.assertTrue(lifecycle_eligible(ModelLifecycle.NORMAL, RiskLevel.R2_NORMAL))
         self.assertFalse(lifecycle_eligible(ModelLifecycle.NORMAL, RiskLevel.R3_HIGH))
-        self.assertTrue(lifecycle_eligible(ModelLifecycle.HIGH_RISK, RiskLevel.R4_CRITICAL_AUTHORITY))
+        self.assertTrue(
+            lifecycle_eligible(ModelLifecycle.HIGH_RISK, RiskLevel.R4_CRITICAL_AUTHORITY)
+        )
 
     def test_shadow_and_disabled_never_execute_authoritative_work(self) -> None:
         for lifecycle in (ModelLifecycle.SHADOW, ModelLifecycle.DISABLED):
