@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main, integration, "kimi/**"]
+  pull_request:
+    branches: [main, integration]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run authority validation
+        run: python -m pytest tests/test_authority.py -v -m authority
+
+      - name: Run lint
+        run: |
+          ruff check src tests
+          ruff format --check src tests
+
+      - name: Run type check
+        run: mypy src tests
+
+      - name: Run unit tests
+        run: python -m pytest tests -v
+
+      - name: Build package
+        run: python -m build
