@@ -28,5 +28,8 @@ jobs:
       - name: Build validation
         run: python scripts/validate_bootstrap.py --mode build
 
-      - name: Test
+      - name: Authority tests
         run: python scripts/validate_bootstrap.py --mode test
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
