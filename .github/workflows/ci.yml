@@ -1,0 +1,32 @@
+name: OmniForge CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - integration
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Lint
+        run: python scripts/validate_bootstrap.py --mode lint
+
+      - name: Build validation
+        run: python scripts/validate_bootstrap.py --mode build
+
+      - name: Test
+        run: python scripts/validate_bootstrap.py --mode test
