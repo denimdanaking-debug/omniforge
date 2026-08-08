@@ -15,6 +15,7 @@ from typing import Any
 from src.providers.identity import ProviderIdentity
 from src.routing.inference_route import InferenceRouteIdentity
 from src.routing.model_identity import ModelIdentity
+from src.security.redaction import redact
 
 
 class ErrorCategory(Enum):
@@ -100,7 +101,8 @@ class ProviderError:
         if self.category is ErrorCategory.UNKNOWN:
             object.__setattr__(self, "category", _category_for_code(self.code))
         if self.safe_diagnostic_message is None:
-            object.__setattr__(self, "safe_diagnostic_message", self.message)
+            object.__setattr__(self, "safe_diagnostic_message", redact(self.message))
+        object.__setattr__(self, "raw_metadata", redact(self.raw_metadata))
 
     def is_infrastructure(self) -> bool:
         """Return True if this is an infrastructure/provider problem."""

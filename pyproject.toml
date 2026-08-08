@@ -71,6 +71,7 @@ convention = "google"
 "src/persistence/configuration.py" = ["N818", "E501"]
 "src/persistence/runtime_state.py" = ["N818", "E501"]
 "src/telemetry/outcomes.py" = ["E501"]
+"src/security/**/*.py" = ["E501"]
 "src/providers/**/*.py" = ["E501"]
 "tests/providers/**/*.py" = ["E501"]
 "tests/test_inference_route.py" = ["I001"]

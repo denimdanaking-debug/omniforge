@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-CURRENT_RUNTIME_STATE_VERSION = "1.0.0"
+from src.security.secrets import SecretValue
+
+CURRENT_RUNTIME_STATE_VERSION = "1.1.0"
 RuntimeMigration = Callable[[dict[str, Any]], dict[str, Any]]
 _RUNTIME_MIGRATIONS: dict[str, tuple[str, RuntimeMigration]] = {}
 
@@ -31,6 +33,8 @@ ALLOWED_WORKFLOW_STATES = frozenset(
         "COMPLETE",
     }
 )
+
+ALLOWED_ROUTING_MODES = frozenset({"legacy", "dynamic"})
 
 
 @dataclass(frozen=True)
@@ -68,6 +72,20 @@ def register_runtime_migration(
         return function
 
     return decorator
+
+
+@register_runtime_migration("1.0.0", "1.1.0")
+def _migrate_runtime_1_0_0_to_1_1_0(old: dict[str, Any]) -> dict[str, Any]:
+    """Add Phase 5 administrative state fields with safe defaults."""
+    working = copy.deepcopy(old)
+    working.setdefault("provider_status", {})
+    working.setdefault("model_status", {})
+    working.setdefault("route_status", {})
+    working.setdefault("routing_mode", "legacy")
+    working.setdefault("exploration_enabled", False)
+    working.setdefault("pins", {})
+    working.setdefault("project_policies", {})
+    return working
 
 
 def _require_version(state: Mapping[str, Any]) -> str:
@@ -119,6 +137,60 @@ def migrate_runtime_state(state: Mapping[str, Any]) -> dict[str, Any]:
     return working
 
 
+def _validate_status_map(path: str, value: Any) -> None:
+    if not isinstance(value, dict):
+        raise CorruptRuntimeState(
+            RuntimeStateDiagnostic("INVALID_STATUS_MAP", f"{path} must be an object")
+        )
+    for key, entry in value.items():
+        if not isinstance(key, str) or not key:
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_STATUS_KEY", f"{path} keys must be non-empty strings"
+                )
+            )
+        if not isinstance(entry, dict):
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic("INVALID_STATUS_ENTRY", f"{path}.{key} must be an object")
+            )
+        enabled = entry.get("enabled")
+        if not isinstance(enabled, bool):
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_STATUS_ENABLED", f"{path}.{key}.enabled must be a boolean"
+                )
+            )
+
+
+def _validate_pins(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise CorruptRuntimeState(RuntimeStateDiagnostic("INVALID_PINS", "pins must be an object"))
+    for pin_id, pin in value.items():
+        if not isinstance(pin_id, str) or not pin_id:
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic("INVALID_PIN_ID", "pin ids must be non-empty strings")
+            )
+        if not isinstance(pin, dict):
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic("INVALID_PIN", f"pin {pin_id!r} must be an object")
+            )
+        allowed = {"provider_id", "model_id", "route_id"}
+        for key in pin:
+            if key not in allowed:
+                raise CorruptRuntimeState(
+                    RuntimeStateDiagnostic(
+                        "UNKNOWN_PIN_FIELD", f"pin {pin_id!r} has unknown field {key!r}"
+                    )
+                )
+
+
+def _validate_project_policies(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise CorruptRuntimeState(
+            RuntimeStateDiagnostic("INVALID_PROJECT_POLICIES", "project_policies must be an object")
+        )
+
+
 def validate_runtime_state(state: Mapping[str, Any]) -> dict[str, Any]:
     working = migrate_runtime_state(state)
 
@@ -141,6 +213,27 @@ def validate_runtime_state(state: Mapping[str, Any]) -> dict[str, Any]:
         raise CorruptRuntimeState(
             RuntimeStateDiagnostic("INVALID_CHECKPOINT", "runtime checkpoint must be an object")
         )
+
+    routing_mode = working.get("routing_mode", "legacy")
+    if routing_mode not in ALLOWED_ROUTING_MODES:
+        raise CorruptRuntimeState(
+            RuntimeStateDiagnostic(
+                "INVALID_ROUTING_MODE",
+                f"routing_mode must be 'legacy' or 'dynamic', got {routing_mode!r}",
+            )
+        )
+
+    exploration = working.get("exploration_enabled", False)
+    if not isinstance(exploration, bool):
+        raise CorruptRuntimeState(
+            RuntimeStateDiagnostic("INVALID_EXPLORATION", "exploration_enabled must be a boolean")
+        )
+
+    _validate_status_map("provider_status", working.get("provider_status", {}))
+    _validate_status_map("model_status", working.get("model_status", {}))
+    _validate_status_map("route_status", working.get("route_status", {}))
+    _validate_pins(working.get("pins", {}))
+    _validate_project_policies(working.get("project_policies", {}))
 
     return working
 
@@ -183,13 +276,20 @@ def load_runtime_state(path: str | Path) -> dict[str, Any]:
         raise type(exc)(diagnostic) from exc
 
 
+def _json_default(value: Any) -> Any:
+    """Fallback JSON encoder that redacts secret wrappers instead of leaking them."""
+    if isinstance(value, SecretValue):
+        return "<redacted>"
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def save_runtime_state(path: str | Path, state: Mapping[str, Any]) -> None:
     """Validate and atomically persist state so restart observes all-or-nothing data."""
 
     destination = Path(path)
     validated = validate_runtime_state(state)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(validated, indent=2, sort_keys=True) + "\n"
+    payload = json.dumps(validated, indent=2, sort_keys=True, default=_json_default) + "\n"
 
     fd, temp_name = tempfile.mkstemp(
         prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent, text=True
