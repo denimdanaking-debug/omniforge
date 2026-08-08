@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Any, Mapping
+from typing import Any
 
 _MODEL_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._:/-]{1,127}$")
 

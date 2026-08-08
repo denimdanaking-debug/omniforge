@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from collections.abc import AsyncIterator
 
+from src.policy.risk import RiskLevel
 from src.providers.adapter import (
     ProviderAdapter,
     ProviderAdapterCapabilities,
@@ -14,11 +16,16 @@ from src.providers.identity import (
     ProviderOperationalState,
     ProviderQuotaState,
 )
+from src.providers.request import Message, MessageRole, ProviderRequest
+from src.providers.response import FinishReason, ProviderResponse, StreamingState, Usage
+from src.routing.model_identity import ModelIdentity
+from src.routing.roles import ExecutionRole
 
 
-class FakeAdapter(ProviderAdapter[dict, dict, str]):
+class FakeAdapter(ProviderAdapter):
     def __init__(self) -> None:
         self.cancelled: list[str] = []
+        self.model = ModelIdentity(model_id="fake-model", family="fake")
 
     @property
     def identity(self) -> ProviderIdentity:
@@ -33,12 +40,33 @@ class FakeAdapter(ProviderAdapter[dict, dict, str]):
             cancellation=True,
         )
 
-    async def submit(self, request: dict) -> dict:
-        return {"echo": request}
+    async def submit(self, request: ProviderRequest) -> ProviderResponse:
+        return ProviderResponse(
+            request_id=request.request_id,
+            provider_id=self.identity,
+            model_id=self.model,
+            text=request.messages[0].content if request.messages else "",
+            finish_reason=FinishReason.STOP,
+            usage=Usage(input_tokens=1, output_tokens=1),
+        )
 
-    async def stream(self, request: dict):
-        yield "first"
-        yield "second"
+    async def stream(self, request: ProviderRequest) -> AsyncIterator[ProviderResponse]:
+        content = request.messages[0].content if request.messages else ""
+        yield ProviderResponse(
+            request_id=request.request_id,
+            provider_id=self.identity,
+            model_id=self.model,
+            text=content[:2],
+            streaming_state=StreamingState.IN_PROGRESS,
+        )
+        yield ProviderResponse(
+            request_id=request.request_id,
+            provider_id=self.identity,
+            model_id=self.model,
+            text=content[2:],
+            streaming_state=StreamingState.COMPLETE,
+            finish_reason=FinishReason.STOP,
+        )
 
     async def cancel(self, request_id: str) -> None:
         self.cancelled.append(request_id)
@@ -56,20 +84,33 @@ class ProviderAdapterTests(unittest.TestCase):
             pass
 
         with self.assertRaises(TypeError):
-            Incomplete()
+            Incomplete()  # type: ignore[abstract]
+
+    def _request(self, content: str) -> ProviderRequest:
+        return ProviderRequest(
+            request_id="req-1",
+            execution_role=ExecutionRole.CODING,
+            risk_level=RiskLevel.R2_NORMAL,
+            messages=[Message(role=MessageRole.USER, content=content)],
+        )
 
     def test_submit_contract(self) -> None:
         adapter = FakeAdapter()
-        result = asyncio.run(adapter.submit({"task": "hello"}))
-        self.assertEqual({"echo": {"task": "hello"}}, result)
+        result = asyncio.run(adapter.submit(self._request("hello")))
+        self.assertEqual("hello", result.text)
+        self.assertEqual(FinishReason.STOP, result.finish_reason)
 
     def test_stream_contract(self) -> None:
         adapter = FakeAdapter()
 
-        async def collect() -> list[str]:
-            return [event async for event in adapter.stream({})]
+        async def collect() -> list[ProviderResponse]:
+            return [event async for event in adapter.stream(self._request("abcd"))]
 
-        self.assertEqual(["first", "second"], asyncio.run(collect()))
+        chunks = asyncio.run(collect())
+        self.assertEqual("ab", chunks[0].text)
+        self.assertEqual(StreamingState.IN_PROGRESS, chunks[0].streaming_state)
+        self.assertEqual("cd", chunks[1].text)
+        self.assertEqual(StreamingState.COMPLETE, chunks[1].streaming_state)
 
     def test_cancel_health_and_quota_contracts(self) -> None:
         adapter = FakeAdapter()

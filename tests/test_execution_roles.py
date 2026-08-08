@@ -57,9 +57,7 @@ class ExecutionRoleTests(unittest.TestCase):
 
     def test_missing_role_profile_does_not_borrow_another_role(self) -> None:
         registry = RolePerformanceRegistry()
-        registry.set(
-            "model-a", ExecutionRole.CODING, RolePerformance(attempts=10, accepted=9)
-        )
+        registry.set("model-a", ExecutionRole.CODING, RolePerformance(attempts=10, accepted=9))
         self.assertEqual(RolePerformance(), registry.get("model-a", ExecutionRole.PLANNING))
 
     def test_role_performance_rejects_impossible_counts(self) -> None:

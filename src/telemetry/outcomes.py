@@ -45,9 +45,15 @@ class TaskOutcome:
 
         if self.kind == OutcomeKind.SUCCESS and self.attribution != OutcomeAttribution.NONE:
             raise ValueError("successful outcomes must use NONE attribution")
-        if self.kind == OutcomeKind.PROVIDER_FAILURE and self.attribution != OutcomeAttribution.PROVIDER:
+        if (
+            self.kind == OutcomeKind.PROVIDER_FAILURE
+            and self.attribution != OutcomeAttribution.PROVIDER
+        ):
             raise ValueError("provider failures must use PROVIDER attribution")
-        if self.kind == OutcomeKind.SYSTEM_FAILURE and self.attribution != OutcomeAttribution.SYSTEM:
+        if (
+            self.kind == OutcomeKind.SYSTEM_FAILURE
+            and self.attribution != OutcomeAttribution.SYSTEM
+        ):
             raise ValueError("system failures must use SYSTEM attribution")
 
     @property

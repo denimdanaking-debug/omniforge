@@ -74,7 +74,9 @@ def migrate_config(config: Mapping[str, Any]) -> dict[str, Any]:
         to_version, migrate = migration
         migrated = migrate(copy.deepcopy(working))
         if not isinstance(migrated, dict):
-            raise InvalidConfiguration(f"migration {version}->{to_version} did not return an object")
+            raise InvalidConfiguration(
+                f"migration {version}->{to_version} did not return an object"
+            )
         migrated["schema_version"] = to_version
         working = migrated
         version = to_version
