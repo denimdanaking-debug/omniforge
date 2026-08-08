@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omniforge.dev/schemas/domain/task-outcome-v1.0.0.schema.json",
+  "title": "OmniForge Task Outcome v1.0.0",
+  "type": "object",
+  "required": ["kind", "attribution"],
+  "additionalProperties": false,
+  "properties": {
+    "kind": {
+      "enum": [
+        "success",
+        "deterministic_validation_failure",
+        "authority_violation",
+        "invalid_model_output",
+        "task_failure",
+        "provider_failure",
+        "system_failure"
+      ]
+    },
+    "attribution": {"enum": ["none", "model", "provider", "system", "unknown"]},
+    "reason_code": {"type": ["string", "null"]},
+    "detail": {"type": ["string", "null"]}
+  }
+}
