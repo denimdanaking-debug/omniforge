@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omniforge.dev/schemas/domain/model-capabilities-v1.0.0.schema.json",
+  "title": "OmniForge Model Capabilities v1.0.0",
+  "type": "object",
+  "required": [
+    "context_tokens",
+    "structured_output",
+    "tool_use",
+    "streaming",
+    "reasoning",
+    "code_generation",
+    "multimodal",
+    "deployment_mode",
+    "cost",
+    "rate",
+    "supported_roles"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "context_tokens": {"type": "integer", "minimum": 1},
+    "structured_output": {"type": "boolean"},
+    "tool_use": {"type": "boolean"},
+    "streaming": {"type": "boolean"},
+    "reasoning": {"type": "boolean"},
+    "code_generation": {"type": "boolean"},
+    "multimodal": {"type": "boolean"},
+    "deployment_mode": {"enum": ["cloud", "local", "hybrid"]},
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "input_per_million": {"type": ["number", "null"], "minimum": 0},
+        "output_per_million": {"type": ["number", "null"], "minimum": 0},
+        "cached_input_per_million": {"type": ["number", "null"], "minimum": 0}
+      }
+    },
+    "rate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_concurrency": {"type": ["integer", "null"], "minimum": 1},
+        "requests_per_minute": {"type": ["integer", "null"], "minimum": 1},
+        "tokens_per_minute": {"type": ["integer", "null"], "minimum": 1}
+      }
+    },
+    "supported_roles": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    }
+  }
+}
