@@ -22,6 +22,7 @@ class ProviderAdapterCapabilities:
     streaming: bool = False
     tool_calls: bool = False
     structured_output: bool = False
+    reasoning: bool = False
     cancellation: bool = True
 
 
