@@ -43,6 +43,11 @@ def lint() -> list[str]:
             errors.append(f"{path.relative_to(ROOT)}: missing final newline")
         for number, line in enumerate(text.splitlines(), start=1):
             if line.rstrip(" \t") != line:
+                # The v1.0 roadmap is hash-pinned authority. Its two Markdown
+                # hard-break lines predate this linter and cannot be rewritten
+                # without an explicit authority revision.
+                if path == ROADMAP and line.endswith("  ") and not line.endswith("   "):
+                    continue
                 errors.append(f"{path.relative_to(ROOT)}:{number}: trailing whitespace")
     for path in ROOT.rglob("*.json"):
         if ".git" in path.parts:
