@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omniforge.dev/schemas/runtime-state/v1.0.0.schema.json",
+  "title": "OmniForge Runtime State v1.0.0",
+  "type": "object",
+  "required": ["schema_version", "run_id", "workflow_state", "checkpoint"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "workflow_state": {
+      "type": "string",
+      "enum": [
+        "STOPPED",
+        "PLANNING",
+        "EXECUTING",
+        "WAITING_FOR_PROVIDER",
+        "WAITING_FOR_RETRY",
+        "VALIDATING",
+        "REVIEWING",
+        "ARBITRATING",
+        "REPAIRING",
+        "INTEGRATING",
+        "BLOCKED",
+        "COMPLETE"
+      ]
+    },
+    "checkpoint": {"type": "object"},
+    "updated_at": {"type": ["string", "null"]},
+    "next_wakeup_at": {"type": ["string", "null"]},
+    "last_error": {"type": ["object", "null"]}
+  }
+}
