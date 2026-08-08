@@ -24,7 +24,7 @@ from src.routing.model_identity import ModelIdentity
         (ProviderErrorCode.UNSUPPORTED_CAPABILITY, ErrorCategory.CAPABILITY),
         (ProviderErrorCode.CONTEXT_OVERFLOW, ErrorCategory.CAPABILITY),
         (ProviderErrorCode.INVALID_MODEL_OUTPUT, ErrorCategory.MODEL_QUALITY),
-        (ProviderErrorCode.TASK_FAILURE, ErrorCategory.PROMPT_CONSTRUCTION),
+        (ProviderErrorCode.TASK_FAILURE, ErrorCategory.TASK),
         (ProviderErrorCode.CANCELLED, ErrorCategory.CANCELLATION),
         (ProviderErrorCode.UNKNOWN, ErrorCategory.UNKNOWN),
     ],
@@ -67,6 +67,19 @@ def test_invalid_model_output_is_model_quality() -> None:
         model_id=ModelIdentity(model_id="model", family="family"),
     )
     assert error.is_model_quality() is True
+    assert error.is_infrastructure() is False
+
+
+def test_task_failure_is_neutral_attribution() -> None:
+    error = ProviderError(
+        code=ProviderErrorCode.TASK_FAILURE,
+        message="Task could not be completed",
+        provider_id=ProviderIdentity("stub", "Stub", "stub.example"),
+        model_id=ModelIdentity(model_id="model", family="family"),
+    )
+    assert error.category is ErrorCategory.TASK
+    assert error.is_model_quality() is False
+    assert error.is_prompt_construction() is False
     assert error.is_infrastructure() is False
 
 

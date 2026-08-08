@@ -27,6 +27,7 @@ class ErrorCategory(Enum):
     CAPABILITY = auto()
     MODEL_QUALITY = auto()
     PROMPT_CONSTRUCTION = auto()
+    TASK = auto()
     CANCELLATION = auto()
     UNKNOWN = auto()
 
@@ -64,7 +65,9 @@ _CAPABILITY_CODES = {
 
 _MODEL_QUALITY_CODES = {ProviderErrorCode.INVALID_MODEL_OUTPUT}
 
-_PROMPT_CODES = {ProviderErrorCode.TASK_FAILURE}
+_PROMPT_CODES: set[ProviderErrorCode] = set()
+
+_TASK_CODES = {ProviderErrorCode.TASK_FAILURE}
 
 _CANCELLATION_CODES = {ProviderErrorCode.CANCELLED}
 
@@ -134,6 +137,8 @@ def _category_for_code(code: ProviderErrorCode) -> ErrorCategory:
         return ErrorCategory.MODEL_QUALITY
     if code in _PROMPT_CODES:
         return ErrorCategory.PROMPT_CONSTRUCTION
+    if code in _TASK_CODES:
+        return ErrorCategory.TASK
     if code in _CANCELLATION_CODES:
         return ErrorCategory.CANCELLATION
     return ErrorCategory.UNKNOWN

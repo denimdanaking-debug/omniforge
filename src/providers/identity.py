@@ -86,6 +86,20 @@ class ProviderQuotaState:
         ):
             if value is not None and value < 0:
                 raise ProviderIdentityError(f"{name} must be non-negative")
+        for remaining_name, limit_name, remaining, limit in (
+            ("remaining_requests", "request_limit", self.remaining_requests, self.request_limit),
+            ("remaining_tokens", "token_limit", self.remaining_tokens, self.token_limit),
+            (
+                "active_concurrency",
+                "concurrency_limit",
+                self.active_concurrency,
+                self.concurrency_limit,
+            ),
+        ):
+            if remaining is not None and limit is not None and remaining > limit:
+                raise ProviderIdentityError(
+                    f"{remaining_name} ({remaining}) cannot exceed {limit_name} ({limit})"
+                )
 
     def is_known(self) -> bool:
         """Return True if any concrete quota information is present."""
@@ -143,10 +157,16 @@ class ProviderQuotaState:
             return None
         return self.active_concurrency / self.concurrency_limit
 
+    def _fraction_pressure(self) -> float | None:
+        """Return pressure implied by remaining_fraction (0.0 = full, 1.0 = exhausted)."""
+        if self.remaining_fraction is None:
+            return None
+        return 1.0 - self.remaining_fraction
+
     def effective_pressure(self) -> float | None:
         """Return the highest known pressure ratio, or None if none can be computed."""
         pressures = [
-            self.remaining_fraction,
+            self._fraction_pressure(),
             self.request_pressure(),
             self.token_pressure(),
             self.concurrency_pressure(),

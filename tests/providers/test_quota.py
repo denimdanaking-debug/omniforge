@@ -73,6 +73,45 @@ class TestQuotaState:
         with pytest.raises(ValueError):
             ProviderQuotaState(remaining_requests=-1)
 
+    @pytest.mark.parametrize(
+        ("remaining_fraction", "expected_pressure"),
+        [
+            (0.90, 0.10),
+            (0.10, 0.90),
+            (0.0, 1.0),
+            (1.0, 0.0),
+        ],
+    )
+    def test_remaining_fraction_pressure(
+        self, remaining_fraction: float, expected_pressure: float
+    ) -> None:
+        quota = ProviderQuotaState(remaining_fraction=remaining_fraction)
+        assert quota.effective_pressure() == pytest.approx(expected_pressure)
+
+    def test_effective_pressure_uses_highest_actual_pressure(self) -> None:
+        quota = ProviderQuotaState(
+            remaining_fraction=0.90,  # 10% pressure
+            remaining_requests=10,
+            request_limit=100,  # 90% pressure
+            remaining_tokens=500,
+            token_limit=1000,  # 50% pressure
+            concurrency_limit=10,
+            active_concurrency=2,  # 20% pressure
+        )
+        assert quota.effective_pressure() == 0.90
+
+    def test_remaining_requests_cannot_exceed_limit(self) -> None:
+        with pytest.raises(ValueError):
+            ProviderQuotaState(remaining_requests=101, request_limit=100)
+
+    def test_remaining_tokens_cannot_exceed_limit(self) -> None:
+        with pytest.raises(ValueError):
+            ProviderQuotaState(remaining_tokens=1001, token_limit=1000)
+
+    def test_active_concurrency_cannot_exceed_limit(self) -> None:
+        with pytest.raises(ValueError):
+            ProviderQuotaState(active_concurrency=5, concurrency_limit=4)
+
 
 class TestOperationalState:
     @pytest.mark.parametrize(
