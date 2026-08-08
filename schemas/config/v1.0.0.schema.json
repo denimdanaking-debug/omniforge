@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omniforge.dev/schemas/config/v1.0.0.schema.json",
+  "title": "OmniForge Configuration v1.0.0",
+  "type": "object",
+  "required": ["schema_version", "routing_mode", "providers"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "routing_mode": {
+      "type": "string",
+      "enum": ["legacy", "dynamic"]
+    },
+    "exploration_enabled": {
+      "type": "boolean",
+      "default": false
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["enabled"],
+        "properties": {
+          "enabled": {"type": "boolean"},
+          "route": {"type": "string"},
+          "models": {
+            "type": "array",
+            "items": {"type": "string"},
+            "uniqueItems": true
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "project_overrides": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}
