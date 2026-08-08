@@ -29,6 +29,7 @@ from src.providers.identity import (
     ProviderIdentity,
     ProviderOperationalState,
     ProviderQuotaState,
+    QuotaSignal,
 )
 from src.providers.request import (
     MessageRole,
@@ -130,7 +131,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     yield ProviderResponse(
                         request_id=request.request_id,
                         provider_id=self._provider_id,
-                        model_id=self._model_id,
+                        model_id=self._resolve_model_identity(request),
                         route_id=self._route_id,
                         text=text,
                         streaming_state=StreamingState.IN_PROGRESS,
@@ -140,7 +141,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             yield ProviderResponse(
                 request_id=request.request_id,
                 provider_id=self._provider_id,
-                model_id=self._model_id,
+                model_id=self._resolve_model_identity(request),
                 route_id=self._route_id,
                 text="",
                 streaming_state=StreamingState.COMPLETE,
@@ -157,10 +158,16 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             self._cancelled.add(request_id)
 
     async def health(self) -> ProviderOperationalState:
-        return ProviderOperationalState(health=ProviderHealth.HEALTHY)
+        # Phase 3: locally configured adapters are not the same as verified
+        # external-provider health. Report DEGRADED with an explicit reason until
+        # a real health observation is available (Phase 6 recovery engine).
+        return ProviderOperationalState(
+            health=ProviderHealth.DEGRADED,
+            reason="Adapter initialized; no external health observation available",
+        )
 
     async def quota(self) -> ProviderQuotaState:
-        return ProviderQuotaState()
+        return ProviderQuotaState(provider_signal=QuotaSignal.UNKNOWN)
 
     def _client(self) -> Any:
         try:
@@ -227,6 +234,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         *,
         latency_seconds: float | None = None,
     ) -> ProviderResponse:
+        model_identity = self._resolve_model_identity(request)
         choice = response.choices[0]
         message = choice.message
         text = message.content or None
@@ -243,7 +251,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         return ProviderResponse(
             request_id=request.request_id,
             provider_id=self._provider_id,
-            model_id=self._model_id,
+            model_id=model_identity,
             route_id=self._route_id,
             text=text,
             structured_result=structured,
@@ -260,7 +268,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         return ProviderResponse(
             request_id=request.request_id,
             provider_id=self._provider_id,
-            model_id=self._model_id,
+            model_id=self._resolve_model_identity(request),
             route_id=self._route_id,
             finish_reason=FinishReason.UNKNOWN,
             usage=Usage(),
@@ -272,7 +280,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         return ProviderResponse(
             request_id=request.request_id,
             provider_id=self._provider_id,
-            model_id=self._model_id,
+            model_id=self._resolve_model_identity(request),
             route_id=self._route_id,
             finish_reason=FinishReason.UNKNOWN,
             usage=Usage(),
@@ -288,6 +296,17 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         if request.target_model is not None:
             return request.target_model.model_id
         return self._model_id.model_id
+
+    def _resolve_model_identity(self, request: ProviderRequest) -> ModelIdentity:
+        """Return the model identity that actually handles the request.
+
+        Prefer an explicitly selected target model; otherwise fall back to the
+        adapter's configured default. This prevents reputation/cost evidence from
+        being misattributed to the wrong model.
+        """
+        if request.target_model is not None:
+            return request.target_model
+        return self._model_id
 
 
 def _reasoning_effort(mode: ReasoningMode) -> str:

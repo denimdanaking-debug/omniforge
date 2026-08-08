@@ -13,7 +13,7 @@ import time
 from typing import Any
 
 from src.providers._common import parse_finish_reason, parse_tool_calls, parse_usage
-from src.providers._models import ModelDescriptor
+from src.providers._models import ModelDescriptor, full_eligibility_roles
 from src.providers._openai_compat import OpenAICompatibleAdapter
 from src.providers.adapter import ProviderAdapterCapabilities
 from src.providers.identity import ProviderIdentity
@@ -47,13 +47,21 @@ class OpenAIAdapter(OpenAICompatibleAdapter):
             streaming=True,
             reasoning=True,
             code_generation=True,
+            supported_roles=full_eligibility_roles(),
         )
         super().__init__(
             provider_id=provider,
             model_id=descriptor.to_identity(),
             api_key=api_key,
             base_url=base_url,
-            capabilities=capabilities,
+            capabilities=capabilities
+            or ProviderAdapterCapabilities(
+                streaming=True,
+                tool_calls=True,
+                structured_output=True,
+                cancellation=True,
+                reasoning=True,
+            ),
         )
         self._descriptor: ModelDescriptor = descriptor
         self._submit_start: float | None = None
@@ -130,7 +138,7 @@ class OpenAIAdapter(OpenAICompatibleAdapter):
         return ProviderResponse(
             request_id=request.request_id,
             provider_id=self._provider_id,
-            model_id=self._model_id,
+            model_id=self._resolve_model_identity(request),
             route_id=self._route_id,
             text=text,
             structured_result=structured,

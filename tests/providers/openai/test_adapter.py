@@ -23,7 +23,7 @@ from src.providers.request import (
     ToolParameter,
 )
 from src.providers.response import FinishReason, StreamingState
-from src.routing.model_identity import ModelLifecycle
+from src.routing.model_identity import ModelIdentity, ModelLifecycle
 from src.routing.roles import ExecutionRole
 
 
@@ -510,3 +510,139 @@ async def test_streaming() -> None:
     assert result_chunks[1].text == "two"
     assert result_chunks[2].streaming_state is StreamingState.COMPLETE
     assert result_chunks[2].finish_reason is FinishReason.STOP
+
+
+@pytest.mark.asyncio
+async def test_target_model_identity_preserved_in_response() -> None:
+    """Explicit target_model must survive request -> provider -> response."""
+    default_model = ModelIdentity(
+        model_id="codex-mini-latest", family="codex", lifecycle=ModelLifecycle.HIGH_RISK
+    )
+    target_model = ModelIdentity(model_id="codex-mini-2025-06-01", family="codex")
+    adapter = OpenAIAdapter(api_key="sk-test")
+    assert adapter.model_id == default_model
+
+    request = ProviderRequest(
+        request_id="target-req",
+        execution_role=ExecutionRole.CODING,
+        risk_level=RiskLevel.R2_NORMAL,
+        messages=[Message(role=MessageRole.USER, content="Hi")],
+        target_model=target_model,
+    )
+    response = {
+        "id": "r",
+        "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+    }
+    client, calls = _make_capture_client(response)
+    adapter = _make_adapter_with_client(client, api_key="sk-test")
+
+    result = await adapter.submit(request)
+
+    assert calls[0]["model"] == target_model.model_id
+    assert result.model_id == target_model
+    assert result.model_id != default_model
+
+
+@pytest.mark.asyncio
+async def test_target_model_identity_preserved_in_stream() -> None:
+    target_model = ModelIdentity(model_id="codex-mini-2025-06-01", family="codex")
+    request = ProviderRequest(
+        request_id="target-stream-req",
+        execution_role=ExecutionRole.CODING,
+        risk_level=RiskLevel.R2_NORMAL,
+        messages=[Message(role=MessageRole.USER, content="Hi")],
+        target_model=target_model,
+    )
+    chunks = [
+        SimpleNamespace(
+            id="s1",
+            choices=[SimpleNamespace(delta=SimpleNamespace(content="One "), finish_reason=None)],
+        ),
+        SimpleNamespace(
+            id="s2",
+            choices=[SimpleNamespace(delta=SimpleNamespace(content="two"), finish_reason="stop")],
+        ),
+    ]
+    client = _make_streaming_client(chunks)
+    adapter = _make_adapter_with_client(client, api_key="sk-test")
+
+    result_chunks = [chunk async for chunk in adapter.stream(request)]
+
+    assert all(chunk.model_id == target_model for chunk in result_chunks)
+    assert result_chunks[-1].streaming_state is StreamingState.COMPLETE
+
+
+@pytest.mark.asyncio
+async def test_target_model_identity_preserved_in_error_response() -> None:
+    target_model = ModelIdentity(model_id="codex-mini-2025-06-01", family="codex")
+    request = ProviderRequest(
+        request_id="target-err-req",
+        execution_role=ExecutionRole.CODING,
+        risk_level=RiskLevel.R2_NORMAL,
+        messages=[Message(role=MessageRole.USER, content="Hi")],
+        target_model=target_model,
+    )
+    client = MagicMock()
+    client.chat.completions.create = MagicMock(side_effect=Exception("rate limit exceeded"))
+    adapter = _make_adapter_with_client(client, api_key="sk-test")
+
+    result = await adapter.submit(request)
+
+    assert result.error_reference is not None
+    assert result.model_id == target_model
+
+
+@pytest.mark.asyncio
+async def test_target_model_identity_preserved_in_cancellation() -> None:
+    target_model = ModelIdentity(model_id="codex-mini-2025-06-01", family="codex")
+    request = ProviderRequest(
+        request_id="target-cancel-req",
+        execution_role=ExecutionRole.CODING,
+        risk_level=RiskLevel.R2_NORMAL,
+        cancellation_id="cancel-1",
+        target_model=target_model,
+    )
+    adapter = _make_adapter_with_client(MagicMock(), api_key="sk-test")
+    await adapter.cancel("cancel-1")
+
+    result = await adapter.submit(request)
+
+    assert result.error_reference == ProviderErrorCode.CANCELLED.value
+    assert result.model_id == target_model
+
+
+@pytest.mark.asyncio
+async def test_supported_roles_are_canonical() -> None:
+    adapter = OpenAIAdapter(api_key="sk-test")
+    caps = adapter.model_capabilities
+    assert ExecutionRole.PLANNING.value in caps.supported_roles
+    assert ExecutionRole.HIGH_RISK_REVIEW.value in caps.supported_roles
+    assert ExecutionRole.INTEGRATION_ANALYSIS.value in caps.supported_roles
+
+
+@pytest.mark.asyncio
+async def test_capability_match_succeeds_for_required_roles() -> None:
+    from src.routing.capabilities import CapabilityRequirement, match_capabilities
+
+    adapter = OpenAIAdapter(api_key="sk-test")
+    caps = adapter.model_capabilities
+    requirement = CapabilityRequirement(
+        min_context_tokens=1,
+        required_roles=frozenset(
+            {
+                ExecutionRole.PLANNING.value,
+                ExecutionRole.ARCHITECTURE.value,
+                ExecutionRole.CODING.value,
+                ExecutionRole.DEBUGGING.value,
+                ExecutionRole.REPAIR.value,
+                ExecutionRole.REVIEW.value,
+                ExecutionRole.HIGH_RISK_REVIEW.value,
+                ExecutionRole.ARBITRATION.value,
+                ExecutionRole.CONTEXT_ANALYSIS.value,
+                ExecutionRole.INTEGRATION_ANALYSIS.value,
+            }
+        ),
+    )
+    match = match_capabilities(caps, requirement)
+    assert match.eligible is True
+    assert match.missing == ()

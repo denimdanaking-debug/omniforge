@@ -20,7 +20,7 @@ from src.providers.request import (
     ToolDefinition,
 )
 from src.providers.response import FinishReason, StreamingState
-from src.routing.model_identity import ModelLifecycle
+from src.routing.model_identity import ModelIdentity, ModelLifecycle
 from src.routing.roles import ExecutionRole
 from tests.providers._openai_compat_mocks import (
     FakeAuthError,
@@ -243,3 +243,94 @@ async def test_unsupported_streaming_rejected() -> None:
     assert can_serve is False
     assert error is not None
     assert error.code is ProviderErrorCode.UNSUPPORTED_CAPABILITY
+
+
+async def test_configurable_model_id_selects_reasoner() -> None:
+    adapter = DeepSeekAdapter(api_key="test-key", model_id="deepseek-reasoner")
+    assert adapter.model_id.model_id == "deepseek-reasoner"
+    assert adapter.model_id.lifecycle is ModelLifecycle.HIGH_RISK
+    assert adapter.capabilities.reasoning is True
+    assert adapter.model_capabilities.reasoning is True
+
+
+async def test_configurable_model_identity_retains_distinct_lifecycle() -> None:
+    chat = ModelIdentity(
+        model_id="deepseek-chat", family="deepseek", lifecycle=ModelLifecycle.NORMAL
+    )
+    reasoner = ModelIdentity(
+        model_id="deepseek-reasoner", family="deepseek", lifecycle=ModelLifecycle.HIGH_RISK
+    )
+    chat_adapter = DeepSeekAdapter(api_key="test-key", model_identity=chat)
+    reasoner_adapter = DeepSeekAdapter(api_key="test-key", model_identity=reasoner)
+    assert chat_adapter.model_id == chat
+    assert reasoner_adapter.model_id == reasoner
+    assert chat_adapter.model_id != reasoner_adapter.model_id
+    assert chat_adapter.model_capabilities.reasoning is False
+    assert reasoner_adapter.model_capabilities.reasoning is True
+
+
+async def test_target_model_identity_preserved_in_response(
+    adapter: DeepSeekAdapter, monkeypatch: Any
+) -> None:
+    target_model = ModelIdentity(model_id="deepseek-reasoner", family="deepseek")
+    request = ProviderRequest(
+        request_id="target-req",
+        execution_role=ExecutionRole.CODING,
+        risk_level=RiskLevel.R2_NORMAL,
+        messages=[Message(role=MessageRole.USER, content="Hi")],
+        target_model=target_model,
+    )
+    params = adapter._build_chat_params(request)
+    assert params["model"] == target_model.model_id
+
+    response = await adapter.submit(request)
+    assert response.model_id == target_model
+
+
+async def test_target_model_identity_preserved_in_stream(
+    adapter: DeepSeekAdapter, monkeypatch: Any
+) -> None:
+    target_model = ModelIdentity(model_id="deepseek-reasoner", family="deepseek")
+    request = ProviderRequest(
+        request_id="target-stream-req",
+        execution_role=ExecutionRole.CODING,
+        risk_level=RiskLevel.R2_NORMAL,
+        target_model=target_model,
+    )
+    chunks = [chunk async for chunk in adapter.stream(request)]
+    assert all(chunk.model_id == target_model for chunk in chunks)
+    assert chunks[-1].streaming_state is StreamingState.COMPLETE
+
+
+async def test_target_model_identity_preserved_in_error_response(monkeypatch: Any) -> None:
+    target_model = ModelIdentity(model_id="deepseek-reasoner", family="deepseek")
+    client = build_mock_openai_client(exception=FakeRateLimitError)
+    adapter = DeepSeekAdapter(api_key="test-key", model_identity=target_model)
+    monkeypatch.setattr(adapter, "_client", lambda: client)
+    request = ProviderRequest(
+        request_id="target-err-req",
+        execution_role=ExecutionRole.CODING,
+        risk_level=RiskLevel.R2_NORMAL,
+        target_model=target_model,
+    )
+    response = await adapter.submit(request)
+    assert response.error_reference == ProviderErrorCode.RATE_LIMITED.value
+    assert response.model_id == target_model
+
+
+async def test_target_model_identity_preserved_in_cancellation(monkeypatch: Any) -> None:
+    target_model = ModelIdentity(model_id="deepseek-reasoner", family="deepseek")
+    client = build_mock_openai_client(response=make_success_response(content="ok"))
+    adapter = DeepSeekAdapter(api_key="test-key", model_identity=target_model)
+    monkeypatch.setattr(adapter, "_client", lambda: client)
+    request = ProviderRequest(
+        request_id="target-cancel-req",
+        execution_role=ExecutionRole.CODING,
+        risk_level=RiskLevel.R2_NORMAL,
+        cancellation_id="cancel-1",
+        target_model=target_model,
+    )
+    await adapter.cancel("cancel-1")
+    response = await adapter.submit(request)
+    assert response.error_reference == ProviderErrorCode.CANCELLED.value
+    assert response.model_id == target_model

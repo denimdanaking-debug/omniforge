@@ -20,7 +20,7 @@ from src.providers.request import (
     ToolDefinition,
 )
 from src.providers.response import FinishReason, StreamingState
-from src.routing.model_identity import ModelLifecycle
+from src.routing.model_identity import ModelIdentity, ModelLifecycle
 from src.routing.roles import ExecutionRole
 from tests.providers._openai_compat_mocks import (
     FakeAuthError,
@@ -223,3 +223,119 @@ async def test_unsupported_streaming_rejected() -> None:
     assert can_serve is False
     assert error is not None
     assert error.code is ProviderErrorCode.UNSUPPORTED_CAPABILITY
+
+
+async def test_configurable_model_id() -> None:
+    adapter = QwenAdapter(api_key="test-key", model_id="qwen3.8-plus")
+    assert adapter.model_id.model_id == "qwen3.8-plus"
+    assert adapter.model_id.family == "qwen"
+    assert adapter.model_id.lifecycle is ModelLifecycle.HIGH_RISK
+
+
+async def test_configurable_model_identity() -> None:
+    custom = ModelIdentity(model_id="qwen3.8-plus", family="qwen")
+    adapter = QwenAdapter(api_key="test-key", model_identity=custom)
+    assert adapter.model_id == custom
+
+
+async def test_target_model_identity_preserved_in_response(
+    adapter: QwenAdapter, monkeypatch: Any
+) -> None:
+    default_model = adapter.model_id
+    target_model = ModelIdentity(model_id="qwen3.8-plus", family="qwen")
+    request = ProviderRequest(
+        request_id="target-req",
+        execution_role=ExecutionRole.CODING,
+        risk_level=RiskLevel.R2_NORMAL,
+        messages=[Message(role=MessageRole.USER, content="Hi")],
+        target_model=target_model,
+    )
+    params = adapter._build_chat_params(request)
+    assert params["model"] == target_model.model_id
+
+    response = await adapter.submit(request)
+    assert response.model_id == target_model
+    assert response.model_id != default_model
+
+
+async def test_target_model_identity_preserved_in_stream(
+    adapter: QwenAdapter, monkeypatch: Any
+) -> None:
+    target_model = ModelIdentity(model_id="qwen3.8-plus", family="qwen")
+    request = ProviderRequest(
+        request_id="target-stream-req",
+        execution_role=ExecutionRole.CODING,
+        risk_level=RiskLevel.R2_NORMAL,
+        target_model=target_model,
+    )
+    chunks = [chunk async for chunk in adapter.stream(request)]
+    assert all(chunk.model_id == target_model for chunk in chunks)
+    assert chunks[-1].streaming_state is StreamingState.COMPLETE
+
+
+async def test_target_model_identity_preserved_in_error_response(monkeypatch: Any) -> None:
+    target_model = ModelIdentity(model_id="qwen3.8-plus", family="qwen")
+    client = build_mock_openai_client(exception=FakeRateLimitError)
+    adapter = QwenAdapter(api_key="test-key", model_identity=target_model)
+    monkeypatch.setattr(adapter, "_client", lambda: client)
+    request = ProviderRequest(
+        request_id="target-err-req",
+        execution_role=ExecutionRole.CODING,
+        risk_level=RiskLevel.R2_NORMAL,
+        target_model=target_model,
+    )
+    response = await adapter.submit(request)
+    assert response.error_reference == ProviderErrorCode.RATE_LIMITED.value
+    assert response.model_id == target_model
+
+
+async def test_target_model_identity_preserved_in_cancellation(monkeypatch: Any) -> None:
+    target_model = ModelIdentity(model_id="qwen3.8-plus", family="qwen")
+    client = build_mock_openai_client(response=make_success_response(content="ok"))
+    adapter = QwenAdapter(api_key="test-key", model_identity=target_model)
+    monkeypatch.setattr(adapter, "_client", lambda: client)
+    request = ProviderRequest(
+        request_id="target-cancel-req",
+        execution_role=ExecutionRole.CODING,
+        risk_level=RiskLevel.R2_NORMAL,
+        cancellation_id="cancel-1",
+        target_model=target_model,
+    )
+    await adapter.cancel("cancel-1")
+    response = await adapter.submit(request)
+    assert response.error_reference == ProviderErrorCode.CANCELLED.value
+    assert response.model_id == target_model
+
+
+async def test_supported_roles_are_canonical() -> None:
+    adapter = QwenAdapter(api_key="test-key")
+    caps = adapter.model_capabilities
+    assert ExecutionRole.PLANNING.value in caps.supported_roles
+    assert ExecutionRole.HIGH_RISK_REVIEW.value in caps.supported_roles
+    assert ExecutionRole.INTEGRATION_ANALYSIS.value in caps.supported_roles
+
+
+async def test_capability_match_succeeds_for_required_roles() -> None:
+    from src.routing.capabilities import CapabilityRequirement, match_capabilities
+
+    adapter = QwenAdapter(api_key="test-key")
+    requirement = CapabilityRequirement(
+        min_context_tokens=1,
+        required_roles=frozenset(
+            {
+                ExecutionRole.PLANNING.value,
+                ExecutionRole.ARCHITECTURE.value,
+                ExecutionRole.CODING.value,
+                ExecutionRole.DEBUGGING.value,
+                ExecutionRole.REPAIR.value,
+                ExecutionRole.REVIEW.value,
+                ExecutionRole.HIGH_RISK_REVIEW.value,
+                ExecutionRole.ARBITRATION.value,
+                ExecutionRole.CONTEXT_ANALYSIS.value,
+                ExecutionRole.INTEGRATION_ANALYSIS.value,
+            }
+        ),
+    )
+    match = match_capabilities(adapter.model_capabilities, requirement)
+    assert match.eligible is True
+    assert match.missing == ()

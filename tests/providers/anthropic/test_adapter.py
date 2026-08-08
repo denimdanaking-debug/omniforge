@@ -13,6 +13,7 @@ import pytest
 from src.policy.risk import RiskLevel
 from src.providers.anthropic import AnthropicAdapter
 from src.providers.errors import ProviderErrorCode
+from src.providers.identity import ProviderHealth
 from src.providers.request import (
     Message,
     MessageRole,
@@ -488,6 +489,117 @@ async def test_cancellation_stream(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_health_and_quota() -> None:
     adapter = AnthropicAdapter()
     health = await adapter.health()
-    assert health.health.value == "healthy"
+    # Phase 3: locally configured adapters do not fabricate external health.
+    assert health.health is ProviderHealth.DEGRADED
+    assert health.reason is not None
+    assert "no external health observation" in health.reason
     quota = await adapter.quota()
     assert quota is not None
+    assert quota.provider_signal.value == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_target_model_identity_preserved_in_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    default_adapter = AnthropicAdapter()
+    default_model = default_adapter._model_id
+    target_model = ModelIdentity(model_id="claude-opus-4", family="claude")
+    client = CapturingFakeClient()
+    test_adapter = AnthropicAdapter(model_id=target_model)
+    monkeypatch.setattr(AnthropicAdapter, "_client", lambda self: client)
+    request = _make_request(
+        request_id="target-req",
+        target_model=target_model,
+    )
+    response = await test_adapter.submit(request)
+
+    assert client.messages.last_call is not None
+    assert client.messages.last_call["model"] == target_model.model_id
+    assert response.model_id == target_model
+    assert response.model_id != default_model
+
+
+@pytest.mark.asyncio
+async def test_target_model_identity_preserved_in_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    target_model = ModelIdentity(model_id="claude-opus-4", family="claude")
+    test_adapter = AnthropicAdapter(model_id=target_model)
+    monkeypatch.setattr(AnthropicAdapter, "_client", lambda self: StreamingFakeClient())
+    request = _make_request(
+        request_id="target-stream-req",
+        target_model=target_model,
+    )
+    chunks = [chunk async for chunk in test_adapter.stream(request)]
+
+    assert all(chunk.model_id == target_model for chunk in chunks)
+    assert chunks[-1].streaming_state is StreamingState.COMPLETE
+
+
+@pytest.mark.asyncio
+async def test_target_model_identity_preserved_in_error_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_model = ModelIdentity(model_id="claude-opus-4", family="claude")
+    test_adapter = AnthropicAdapter(model_id=target_model)
+    monkeypatch.setattr(
+        AnthropicAdapter,
+        "_client",
+        lambda self: RaisingFakeClient(RuntimeError("boom")),
+    )
+    request = _make_request(
+        request_id="target-err-req",
+        target_model=target_model,
+    )
+    response = await test_adapter.submit(request)
+
+    assert response.error_reference is not None
+    assert response.model_id == target_model
+
+
+@pytest.mark.asyncio
+async def test_target_model_identity_preserved_in_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_model = ModelIdentity(model_id="claude-opus-4", family="claude")
+    test_adapter = AnthropicAdapter(model_id=target_model)
+    monkeypatch.setattr(AnthropicAdapter, "_client", lambda self: CapturingFakeClient())
+    request = _make_request(
+        request_id="target-cancel-req",
+        cancellation_id="cancel-1",
+        target_model=target_model,
+    )
+    await test_adapter.cancel("cancel-1")
+    response = await test_adapter.submit(request)
+
+    assert response.error_reference == ProviderErrorCode.CANCELLED.value
+    assert response.model_id == target_model
+
+
+@pytest.mark.asyncio
+async def test_supported_roles_are_canonical() -> None:
+    from src.routing.capabilities import CapabilityRequirement, match_capabilities
+
+    adapter = AnthropicAdapter()
+    caps = adapter.model_capabilities
+    assert ExecutionRole.PLANNING.value in caps.supported_roles
+    assert ExecutionRole.HIGH_RISK_REVIEW.value in caps.supported_roles
+    assert ExecutionRole.INTEGRATION_ANALYSIS.value in caps.supported_roles
+
+    requirement = CapabilityRequirement(
+        min_context_tokens=1,
+        required_roles=frozenset(
+            {
+                ExecutionRole.PLANNING.value,
+                ExecutionRole.ARCHITECTURE.value,
+                ExecutionRole.CODING.value,
+                ExecutionRole.DEBUGGING.value,
+                ExecutionRole.REPAIR.value,
+                ExecutionRole.REVIEW.value,
+                ExecutionRole.HIGH_RISK_REVIEW.value,
+                ExecutionRole.ARBITRATION.value,
+                ExecutionRole.CONTEXT_ANALYSIS.value,
+                ExecutionRole.INTEGRATION_ANALYSIS.value,
+            }
+        ),
+    )
+    match = match_capabilities(caps, requirement)
+    assert match.eligible is True
+    assert match.missing == ()

@@ -26,6 +26,7 @@ from src.providers.identity import (
     ProviderIdentity,
     ProviderOperationalState,
     ProviderQuotaState,
+    QuotaSignal,
 )
 from src.providers.request import (
     MessageRole,
@@ -199,10 +200,16 @@ class GeminiAdapter(ProviderAdapter):
             self._cancelled.add(request_id)
 
     async def health(self) -> ProviderOperationalState:
-        return ProviderOperationalState(health=ProviderHealth.HEALTHY)
+        # Phase 3: locally configured adapters are not the same as verified
+        # external-provider health. Report DEGRADED until a real observation is
+        # available (Phase 6 recovery engine).
+        return ProviderOperationalState(
+            health=ProviderHealth.DEGRADED,
+            reason="Adapter initialized; no external health observation available",
+        )
 
     async def quota(self) -> ProviderQuotaState:
-        return ProviderQuotaState()
+        return ProviderQuotaState(provider_signal=QuotaSignal.UNKNOWN)
 
     def translate_error(self, raw_error: Any) -> ProviderError:
         """Translate a Gemini SDK error into the normalized taxonomy."""

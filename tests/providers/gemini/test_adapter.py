@@ -425,3 +425,76 @@ async def test_cancel_tracks_request_id(adapter: GeminiAdapter) -> None:
     )
     response = await adapter.submit(request)
     assert response.error_reference == ProviderErrorCode.CANCELLED.value
+
+
+@pytest.mark.asyncio
+async def test_target_model_identity_preserved_in_response(adapter: GeminiAdapter) -> None:
+    target_model = ModelIdentity(model_id="gemini-2.0-flash", family="gemini")
+    request = ProviderRequest(
+        request_id="target-req",
+        execution_role=ExecutionRole.CODING,
+        risk_level=RiskLevel.R2_NORMAL,
+        messages=[Message(role=MessageRole.USER, content="Hi")],
+        target_model=target_model,
+    )
+    response = await adapter.submit(request)
+    calls = adapter._client().aio.models.generate_content_calls
+    assert calls[-1]["model"] == target_model.model_id
+    assert response.model_id == target_model
+
+
+@pytest.mark.asyncio
+async def test_target_model_identity_preserved_in_stream(adapter: GeminiAdapter) -> None:
+    target_model = ModelIdentity(model_id="gemini-2.0-flash", family="gemini")
+    request = ProviderRequest(
+        request_id="target-stream-req",
+        execution_role=ExecutionRole.CODING,
+        risk_level=RiskLevel.R2_NORMAL,
+        messages=[Message(role=MessageRole.USER, content="Stream")],
+        target_model=target_model,
+    )
+    chunks = [chunk async for chunk in adapter.stream(request)]
+    assert all(chunk.model_id == target_model for chunk in chunks)
+    assert chunks[-1].streaming_state is StreamingState.COMPLETE
+
+
+@pytest.mark.asyncio
+async def test_target_model_identity_preserved_in_error_response(adapter: GeminiAdapter) -> None:
+    target_model = ModelIdentity(model_id="gemini-2.0-flash", family="gemini")
+
+    class _FailingModels:
+        async def generate_content(self, **kwargs: Any) -> Any:
+            raise APIError(code=429, response_json={"error": {"message": "rate limit"}})
+
+        async def generate_content_stream(self, **kwargs: Any) -> AsyncIterator[Any]:
+            raise APIError(code=429, response_json={"error": {"message": "rate limit"}})
+
+    failing_client = _FakeClient()
+    failing_client.aio.models = _FailingModels()  # type: ignore[assignment]
+    adapter._client = lambda: failing_client  # type: ignore[method-assign]
+    request = ProviderRequest(
+        request_id="target-err-req",
+        execution_role=ExecutionRole.CODING,
+        risk_level=RiskLevel.R2_NORMAL,
+        messages=[Message(role=MessageRole.USER, content="fail")],
+        target_model=target_model,
+    )
+    response = await adapter.submit(request)
+    assert response.error_reference == ProviderErrorCode.RATE_LIMITED.value
+    assert response.model_id == target_model
+
+
+@pytest.mark.asyncio
+async def test_target_model_identity_preserved_in_cancellation(adapter: GeminiAdapter) -> None:
+    target_model = ModelIdentity(model_id="gemini-2.0-flash", family="gemini")
+    request = ProviderRequest(
+        request_id="target-cancel-req",
+        execution_role=ExecutionRole.CODING,
+        risk_level=RiskLevel.R2_NORMAL,
+        cancellation_id="cancel-1",
+        target_model=target_model,
+    )
+    await adapter.cancel("cancel-1")
+    response = await adapter.submit(request)
+    assert response.error_reference == ProviderErrorCode.CANCELLED.value
+    assert response.model_id == target_model

@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from src.providers._common import redact_secrets, translate_exception
-from src.providers._models import ModelDescriptor
+from src.providers._models import ModelDescriptor, full_eligibility_roles
 from src.providers.adapter import ProviderAdapter, ProviderAdapterCapabilities
 from src.providers.errors import ProviderError, ProviderErrorCode
 from src.providers.identity import (
@@ -21,6 +21,7 @@ from src.providers.identity import (
     ProviderIdentity,
     ProviderOperationalState,
     ProviderQuotaState,
+    QuotaSignal,
 )
 from src.providers.request import (
     Message,
@@ -37,11 +38,12 @@ from src.providers.response import (
     ToolCallArgument,
     Usage,
 )
+from src.routing.capabilities import ModelCapabilities
+from src.routing.inference_route import InferenceRouteIdentity
 from src.routing.model_identity import ModelIdentity, ModelLifecycle
 
 
-def _default_model() -> ModelIdentity:
-    """Return the default Claude model identity."""
+def _default_descriptor() -> ModelDescriptor:
     return ModelDescriptor(
         model_id="claude-sonnet-4-20250514",
         family="claude",
@@ -51,7 +53,13 @@ def _default_model() -> ModelIdentity:
         tool_use=True,
         streaming=True,
         reasoning=True,
-    ).to_identity()
+        supported_roles=full_eligibility_roles(),
+    )
+
+
+def _default_model() -> ModelIdentity:
+    """Return the default Claude model identity."""
+    return _default_descriptor().to_identity()
 
 
 class AnthropicAdapter(ProviderAdapter):
@@ -63,16 +71,20 @@ class AnthropicAdapter(ProviderAdapter):
         model_id: ModelIdentity | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
+        route_id: InferenceRouteIdentity | None = None,
         capabilities: ProviderAdapterCapabilities | None = None,
     ) -> None:
         self._model_id = model_id or _default_model()
+        self._descriptor = _descriptor_for_identity(self._model_id)
         self._api_key = api_key
         self._base_url = base_url
+        self._route_id = route_id
         self._capabilities = capabilities or ProviderAdapterCapabilities(
             streaming=True,
             tool_calls=True,
             structured_output=True,
             cancellation=True,
+            reasoning=True,
         )
         self._cancelled: set[str] = set()
 
@@ -85,6 +97,11 @@ class AnthropicAdapter(ProviderAdapter):
     def capabilities(self) -> ProviderAdapterCapabilities:
         """Capabilities advertised by this adapter."""
         return self._capabilities
+
+    @property
+    def model_capabilities(self) -> ModelCapabilities:
+        """Return canonical capabilities for the configured model."""
+        return self._descriptor.to_capabilities()
 
     async def submit(self, request: ProviderRequest) -> ProviderResponse:
         """Submit a request to Anthropic and return a normalized response."""
@@ -139,7 +156,8 @@ class AnthropicAdapter(ProviderAdapter):
                         yield ProviderResponse(
                             request_id=request.request_id,
                             provider_id=self.identity,
-                            model_id=self._model_id,
+                            model_id=self._resolve_model_identity(request),
+                            route_id=self._route_id,
                             text=getattr(delta, "text", None),
                             streaming_state=StreamingState.IN_PROGRESS,
                             usage=Usage(),
@@ -155,7 +173,8 @@ class AnthropicAdapter(ProviderAdapter):
             yield ProviderResponse(
                 request_id=request.request_id,
                 provider_id=self.identity,
-                model_id=self._model_id,
+                model_id=self._resolve_model_identity(request),
+                route_id=self._route_id,
                 text="",
                 streaming_state=StreamingState.COMPLETE,
                 usage=usage,
@@ -174,11 +193,17 @@ class AnthropicAdapter(ProviderAdapter):
 
     async def health(self) -> ProviderOperationalState:
         """Return the operational health of the Anthropic adapter."""
-        return ProviderOperationalState(health=ProviderHealth.HEALTHY)
+        # Phase 3: a locally configured adapter is not the same as a verified
+        # healthy external provider. Report DEGRADED until a real observation is
+        # available (Phase 6 recovery engine).
+        return ProviderOperationalState(
+            health=ProviderHealth.DEGRADED,
+            reason="Adapter initialized; no external health observation available",
+        )
 
     async def quota(self) -> ProviderQuotaState:
         """Return quota state; Anthropic headers are not currently parsed."""
-        return ProviderQuotaState()
+        return ProviderQuotaState(provider_signal=QuotaSignal.UNKNOWN)
 
     def translate_error(self, raw_error: Any) -> ProviderError:
         """Translate a raw Anthropic error into the normalized taxonomy."""
@@ -313,7 +338,8 @@ class AnthropicAdapter(ProviderAdapter):
         return ProviderResponse(
             request_id=request.request_id,
             provider_id=self.identity,
-            model_id=self._model_id,
+            model_id=self._resolve_model_identity(request),
+            route_id=self._route_id,
             text=text,
             structured_result=structured,
             tool_calls=tool_calls,
@@ -477,7 +503,8 @@ class AnthropicAdapter(ProviderAdapter):
         return ProviderResponse(
             request_id=request.request_id,
             provider_id=self.identity,
-            model_id=self._model_id,
+            model_id=self._resolve_model_identity(request),
+            route_id=self._route_id,
             finish_reason=FinishReason.UNKNOWN,
             usage=Usage(),
             error_reference=error.code.value,
@@ -489,7 +516,8 @@ class AnthropicAdapter(ProviderAdapter):
         return ProviderResponse(
             request_id=request.request_id,
             provider_id=self.identity,
-            model_id=self._model_id,
+            model_id=self._resolve_model_identity(request),
+            route_id=self._route_id,
             finish_reason=FinishReason.UNKNOWN,
             usage=Usage(),
             error_reference=ProviderErrorCode.CANCELLED.value,
@@ -506,3 +534,25 @@ class AnthropicAdapter(ProviderAdapter):
         if request.target_model is not None:
             return request.target_model.model_id
         return self._model_id.model_id
+
+    def _resolve_model_identity(self, request: ProviderRequest) -> ModelIdentity:
+        """Return the model identity that actually handles the request."""
+        if request.target_model is not None:
+            return request.target_model
+        return self._model_id
+
+
+def _descriptor_for_identity(identity: ModelIdentity) -> ModelDescriptor:
+    if identity.model_id == _default_descriptor().model_id:
+        return _default_descriptor()
+    return ModelDescriptor(
+        model_id=identity.model_id,
+        family=identity.family,
+        lifecycle=identity.lifecycle,
+        context_tokens=200_000,
+        structured_output=True,
+        tool_use=True,
+        streaming=True,
+        reasoning=True,
+        supported_roles=full_eligibility_roles(),
+    )

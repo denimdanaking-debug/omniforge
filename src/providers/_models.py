@@ -11,6 +11,11 @@ from dataclasses import dataclass
 
 from src.routing.capabilities import CostMetadata, DeploymentMode, ModelCapabilities, RateMetadata
 from src.routing.model_identity import ModelIdentity, ModelLifecycle
+from src.routing.roles import ExecutionRole
+
+# Canonical roles a production model may be eligible for. This intentionally
+# reuses ``ExecutionRole.value`` so capability matching aligns with routing.
+_FULL_ELIGIBILITY_ROLES: frozenset[str] = frozenset(role.value for role in ExecutionRole)
 
 
 @dataclass(frozen=True)
@@ -36,6 +41,7 @@ class ModelDescriptor:
     max_concurrency: int | None = None
     requests_per_minute: int | None = None
     tokens_per_minute: int | None = None
+    supported_roles: frozenset[str] | None = None
     capability_metadata: dict[str, object] | None = None
 
     def to_identity(self) -> ModelIdentity:
@@ -70,4 +76,12 @@ class ModelDescriptor:
                 requests_per_minute=self.requests_per_minute,
                 tokens_per_minute=self.tokens_per_minute,
             ),
+            supported_roles=self.supported_roles
+            if self.supported_roles is not None
+            else frozenset(),
         )
+
+
+def full_eligibility_roles() -> frozenset[str]:
+    """Return the canonical set of all execution-role values."""
+    return _FULL_ELIGIBILITY_ROLES
