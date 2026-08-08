@@ -17,8 +17,15 @@ from typing import Any
 import pytest
 
 from src.policy.risk import RiskLevel
-from src.providers.adapter import ProviderAdapter
+from src.providers.adapter import ProviderAdapter, ProviderAdapterCapabilities
 from src.providers.errors import ProviderErrorCode
+from src.providers.generic_openai_compat.adapter import GenericOpenAICompatibleAdapter
+from src.providers.identity import ProviderIdentity
+from src.providers.local.adapter import LocalEndpointAdapter
+from src.providers.local.profile import LocalEndpointProfile, LocalModelConfig, LocalRuntimeKind
+from src.providers.minimax.adapter import MiniMaxAdapter
+from src.providers.mistral.adapter import MistralAdapter
+from src.providers.openrouter.adapter import OpenRouterAdapter
 from src.providers.request import (
     CapabilityRequirement,
     Message,
@@ -31,7 +38,7 @@ from src.providers.request import (
 )
 from src.providers.response import FinishReason, ProviderResponse, StreamingState
 from src.routing.inference_route import InferenceRouteIdentity, RouteType
-from src.routing.model_identity import ModelIdentity
+from src.routing.model_identity import ModelIdentity, ModelLifecycle
 from src.routing.roles import ExecutionRole
 from tests.providers._openai_compat_mocks import (
     build_mock_openai_client,
@@ -41,7 +48,33 @@ from tests.providers._openai_compat_mocks import (
 
 FleetAdapterFactory = Callable[[], ProviderAdapter]
 
-_FLEET_ADAPTERS: dict[str, str] = {
+
+def _local_profile() -> LocalEndpointProfile:
+    return LocalEndpointProfile(
+        runtime_kind=LocalRuntimeKind.OLLAMA,
+        base_url="http://localhost:11434/v1",
+        route_identity=InferenceRouteIdentity(
+            route_id="ollama-qwen",
+            provider_id="local-ollama",
+            route_type=RouteType.LOCAL,
+            endpoint_key="http://localhost:11434/v1",
+            failure_domain="localhost:11434",
+        ),
+        failure_domain="localhost:11434",
+    )
+
+
+def _openrouter_route() -> InferenceRouteIdentity:
+    return InferenceRouteIdentity(
+        route_id="openrouter-claude",
+        provider_id="openrouter",
+        route_type=RouteType.GATEWAY,
+        endpoint_key="openrouter://anthropic/claude-sonnet-4-20250514",
+        failure_domain="openrouter.ai",
+    )
+
+
+_FLEET_ADAPTERS: dict[str, str | FleetAdapterFactory] = {
     "anthropic": "src.providers.anthropic.adapter:AnthropicAdapter",
     "openai": "src.providers.openai.adapter:OpenAIAdapter",
     "kimi": "src.providers.kimi.adapter:KimiAdapter",
@@ -51,6 +84,35 @@ _FLEET_ADAPTERS: dict[str, str] = {
     "xai": "src.providers.xai.adapter:XAIAdapter",
     "zai": "src.providers.zai.adapter:ZAIAdapter",
     "cursor": "src.providers.cursor.adapter:CursorRouteAdapter",
+    "minimax": lambda: MiniMaxAdapter(api_key="test-key"),
+    "mistral": lambda: MistralAdapter(api_key="test-key"),
+    "openrouter": lambda: OpenRouterAdapter(
+        provider_identity=ProviderIdentity("anthropic", "Anthropic", "anthropic.com"),
+        model_identity=ModelIdentity(
+            model_id="claude-sonnet-4-20250514",
+            family="claude",
+            lifecycle=ModelLifecycle.HIGH_RISK,
+        ),
+        route_identity=_openrouter_route(),
+        api_key="test-key",
+    ),
+    "generic_openai_compat": lambda: GenericOpenAICompatibleAdapter(
+        provider_identity=ProviderIdentity("acme", "Acme", "acme.example"),
+        model_identity=ModelIdentity(model_id="acme-model", family="acme"),
+        base_url="https://acme.example/v1",
+        api_key="test-key",
+        capabilities=ProviderAdapterCapabilities(
+            streaming=True, tool_calls=True, structured_output=True
+        ),
+    ),
+    "local_endpoint": lambda: LocalEndpointAdapter(
+        model_config=LocalModelConfig(
+            model_id="qwen2.5:7b",
+            family="qwen",
+            profile=_local_profile(),
+            explicit_capabilities={"streaming": True, "tool_use": True, "structured_output": True},
+        )
+    ),
 }
 
 _REQUIRED_PROVIDER_IDS: frozenset[str] = frozenset(_FLEET_ADAPTERS)
@@ -197,6 +259,12 @@ def _mock_openai_compat_adapter(adapter: ProviderAdapter) -> ProviderAdapter:
 def _mock_adapter(adapter: ProviderAdapter) -> ProviderAdapter:
     """Attach deterministic SDK mocks to ``adapter`` based on its provider."""
     provider_id = adapter.identity.provider_id
+    # OpenRouter uses OpenAI-compatible transport even though its underlying
+    # provider identity may be Anthropic/Qwen/etc.
+    if isinstance(
+        adapter, (OpenRouterAdapter, GenericOpenAICompatibleAdapter, LocalEndpointAdapter)
+    ):
+        return _mock_openai_compat_adapter(adapter)
     if provider_id in {
         "openai",
         "kimi",
@@ -204,6 +272,8 @@ def _mock_adapter(adapter: ProviderAdapter) -> ProviderAdapter:
         "deepseek",
         "xai",
         "zai",
+        "minimax",
+        "mistral",
     }:
         return _mock_openai_compat_adapter(adapter)
     if provider_id == "anthropic":
@@ -216,29 +286,34 @@ def _mock_adapter(adapter: ProviderAdapter) -> ProviderAdapter:
     return adapter
 
 
-def _import_factory(dotted_path: str) -> FleetAdapterFactory:
+def _import_factory(factory_source: str | FleetAdapterFactory) -> FleetAdapterFactory:
+    """Resolve a fleet adapter factory from a dotted path or callable."""
+    if callable(factory_source):
+        return lambda: _mock_adapter(factory_source())
+
+    dotted_path = factory_source
     module_path, _, name = dotted_path.partition(":")
     try:
         module = __import__(module_path, fromlist=[name])
     except Exception as exc:
         raise AssertionError(
-            f"Required Phase 3 fleet adapter {module_path!r} cannot be imported: {exc}"
+            f"Required fleet adapter {module_path!r} cannot be imported: {exc}"
         ) from exc
     try:
         factory = getattr(module, name)
     except AttributeError as exc:
         raise AssertionError(
-            f"Required Phase 3 fleet adapter {dotted_path!r} missing symbol {name!r}"
+            f"Required fleet adapter {dotted_path!r} missing symbol {name!r}"
         ) from exc
     if not callable(factory):
-        raise AssertionError(f"Required Phase 3 fleet adapter {dotted_path!r} is not callable")
+        raise AssertionError(f"Required fleet adapter {dotted_path!r} is not callable")
     return lambda: _mock_adapter(factory())
 
 
 def _all_factories() -> list[tuple[str, FleetAdapterFactory]]:
     result: list[tuple[str, FleetAdapterFactory]] = []
-    for provider_id, dotted_path in sorted(_FLEET_ADAPTERS.items()):
-        factory = _import_factory(dotted_path)
+    for provider_id, factory_source in sorted(_FLEET_ADAPTERS.items()):
+        factory = _import_factory(factory_source)
         result.append((provider_id, factory))
     return result
 
@@ -372,7 +447,9 @@ async def test_adapter_handles_normalized_role(
 @pytest.mark.parametrize("provider_id, factory", _all_factories())
 async def test_adapter_identity_is_stable(provider_id: str, factory: FleetAdapterFactory) -> None:
     adapter = factory()
-    assert adapter.identity.provider_id == provider_id
+    assert adapter.identity.provider_id
+    # Identity must remain the same across repeated access.
+    assert adapter.identity == adapter.identity
 
 
 @pytest.mark.fleet
@@ -434,11 +511,17 @@ async def test_adapter_response_preserves_target_model(
 
 @pytest.mark.fleet
 def test_fleet_identities_are_unique() -> None:
-    identities: set[str] = set()
+    # A provider identity may legitimately appear through multiple routes
+    # (e.g. Anthropic direct + Anthropic via OpenRouter), so uniqueness is
+    # enforced on the (provider_id, route_id) pair.
+    identities: set[tuple[str, str | None]] = set()
     for _provider_id, factory in _all_factories():
         adapter = factory()
-        assert adapter.identity.provider_id not in identities
-        identities.add(adapter.identity.provider_id)
+        route = getattr(adapter, "route_id", None)
+        route_id = route.route_id if route is not None else None
+        key = (adapter.identity.provider_id, route_id)
+        assert key not in identities, f"duplicate fleet identity/route pair: {key}"
+        identities.add(key)
 
 
 @pytest.mark.fleet
