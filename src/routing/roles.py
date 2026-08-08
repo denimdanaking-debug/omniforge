@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Mapping
 
+from src.policy.risk import RiskLevel
+
 
 class ExecutionRole(StrEnum):
     PLANNING = "planning"
@@ -22,10 +24,11 @@ class ExecutionRole(StrEnum):
 
 @dataclass(frozen=True)
 class RoutingRequest:
-    """Provider-neutral dispatch request; role is mandatory by construction."""
+    """Provider-neutral dispatch request; role and risk are mandatory by construction."""
 
     task_id: str
     role: ExecutionRole
+    risk: RiskLevel
     project_id: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
