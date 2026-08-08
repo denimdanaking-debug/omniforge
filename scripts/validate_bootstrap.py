@@ -20,9 +20,16 @@ TEXT_SUFFIXES = {".md", ".json", ".py", ".yml", ".yaml", ".toml", ".txt"}
 
 
 def iter_text_files():
-    ignored = {".git", ".venv", "venv", "node_modules", "bin", "obj"}
+    ignored = {
+        ".git", ".venv", "venv", "node_modules", "bin", "obj",
+        ".mypy_cache", ".pytest_cache", ".ruff_cache", "build", "dist",
+    }
     for path in ROOT.rglob("*"):
-        if not path.is_file() or any(part in ignored for part in path.parts):
+        if not path.is_file():
+            continue
+        if any(part in ignored for part in path.parts):
+            continue
+        if any(part.endswith(".egg-info") for part in path.parts):
             continue
         if path.suffix.lower() in TEXT_SUFFIXES or path.name in {".gitignore", ".editorconfig"}:
             yield path
