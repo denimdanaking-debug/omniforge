@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from src.policy.risk import RiskLevel
 from src.routing.roles import (
     ExecutionRole,
     RolePerformance,
@@ -28,11 +29,16 @@ class ExecutionRoleTests(unittest.TestCase):
             {role.value for role in ExecutionRole},
         )
 
-    def test_routing_request_requires_explicit_role(self) -> None:
-        request = RoutingRequest(task_id="task-1", role=ExecutionRole.CODING)
+    def test_routing_request_requires_explicit_role_and_risk(self) -> None:
+        request = RoutingRequest(
+            task_id="task-1", role=ExecutionRole.CODING, risk=RiskLevel.R2_NORMAL
+        )
         self.assertEqual(ExecutionRole.CODING, request.role)
+        self.assertEqual(RiskLevel.R2_NORMAL, request.risk)
         with self.assertRaises(TypeError):
-            RoutingRequest(task_id="task-2")  # type: ignore[call-arg]
+            RoutingRequest(task_id="task-2", risk=RiskLevel.R1_LOW)  # type: ignore[call-arg]
+        with self.assertRaises(TypeError):
+            RoutingRequest(task_id="task-3", role=ExecutionRole.CODING)  # type: ignore[call-arg]
 
     def test_model_performance_isolated_by_role(self) -> None:
         registry = RolePerformanceRegistry()

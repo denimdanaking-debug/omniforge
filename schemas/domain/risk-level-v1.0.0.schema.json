@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omniforge.dev/schemas/domain/risk-level-v1.0.0.schema.json",
+  "title": "OmniForge Risk Level v1.0.0",
+  "type": "string",
+  "enum": [
+    "R0_TRIVIAL",
+    "R1_LOW",
+    "R2_NORMAL",
+    "R3_HIGH",
+    "R4_CRITICAL_AUTHORITY"
+  ]
+}
