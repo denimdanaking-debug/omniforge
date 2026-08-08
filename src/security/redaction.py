@@ -2,6 +2,10 @@
 
 This is defense in depth: the primary protection is never persisting secrets.
 Redaction catches accidental leakage in exceptions, metadata, and diagnostics.
+
+Redaction is both key-aware and value-pattern-aware. Structured fields whose
+keys are known to carry secret material are redacted regardless of value shape,
+while ordinary string content is scanned for common credential patterns.
 """
 
 from __future__ import annotations
@@ -38,8 +42,42 @@ _REDACTION_PATTERNS = [
         "client_secret=***",
     ),
     (re.compile(r"password['\"\\s]*[:=]['\"\\s]*[^\s&]{4,}", re.IGNORECASE), "password=***"),
-    (re.compile(r"Authorization['\"\\s]*:\\s*[^\r\n]+", re.IGNORECASE), "Authorization: ***"),
+    (re.compile(r"Authorization['\"\\s]*:\s*[^\r\n]+", re.IGNORECASE), "Authorization: ***"),
 ]
+
+# Canonical sensitive structured-field names. Variants are matched after
+# normalizing separators and case, so api_key, api-key, apikey, and "API Key"
+# are all treated as sensitive.
+SENSITIVE_STRUCTURED_KEYS = frozenset(
+    {
+        "apikey",
+        "secretkey",
+        "accesstoken",
+        "bearertoken",
+        "clientsecret",
+        "password",
+        "passwd",
+        "authorization",
+        "proxyauthorization",
+        "credential",
+        "credentials",
+    }
+)
+
+
+def _normalize_key(key: str) -> str:
+    """Lowercase and remove common separators for key comparison."""
+    lowered = key.lower()
+    for separator in ("_", "-", " ", "."):
+        lowered = lowered.replace(separator, "")
+    return lowered
+
+
+def _is_sensitive_key(key: Any) -> bool:
+    """Return True if ``key`` is a known secret-bearing structured field."""
+    if not isinstance(key, str):
+        return False
+    return _normalize_key(key) in SENSITIVE_STRUCTURED_KEYS
 
 
 def _redact_string(text: str) -> str:
@@ -49,11 +87,22 @@ def _redact_string(text: str) -> str:
 
 
 def redact(value: Any) -> Any:
-    """Recursively redact likely secret material while preserving structure."""
+    """Recursively redact likely secret material while preserving structure.
+
+    Dictionary keys recognized as secret-bearing cause their entire value to be
+    replaced with ``<redacted>``. Other values receive recursive value-pattern
+    redaction. Innocent prose is preserved.
+    """
     if isinstance(value, str):
         return _redact_string(value)
     if isinstance(value, dict):
-        return {key: redact(item) for key, item in value.items()}
+        result: dict[Any, Any] = {}
+        for key, item in value.items():
+            if _is_sensitive_key(key):
+                result[key] = "<redacted>"
+            else:
+                result[key] = redact(item)
+        return result
     if isinstance(value, list):
         return [redact(item) for item in value]
     if isinstance(value, tuple):

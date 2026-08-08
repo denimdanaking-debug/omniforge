@@ -21,6 +21,21 @@ class SecretSource(StrEnum):
     ENVIRONMENT = "environment"
 
 
+def _validate_secret_reference_metadata(metadata: dict[str, Any]) -> None:
+    """Ensure metadata only contains safe, known keys.
+
+    Arbitrary metadata must not become a secret-smuggling channel.
+    """
+    for key, value in metadata.items():
+        if key != "allow_empty":
+            raise ValueError(
+                f"SecretReference metadata contains unknown key {key!r}; "
+                "only 'allow_empty' is permitted"
+            )
+        if not isinstance(value, bool):
+            raise ValueError("SecretReference metadata 'allow_empty' must be a boolean")
+
+
 @dataclass(frozen=True)
 class SecretReference:
     """A safe, persistable reference to a secret. No value is stored here."""
@@ -34,6 +49,9 @@ class SecretReference:
             raise ValueError("SecretReference.name must be non-empty")
         if self.source == SecretSource.ENVIRONMENT and "=" in self.name:
             raise ValueError("environment secret name must not contain '='")
+        if not isinstance(self.metadata, dict):
+            raise ValueError("SecretReference.metadata must be a dict")
+        _validate_secret_reference_metadata(self.metadata)
 
 
 @dataclass(frozen=True)
@@ -127,6 +145,9 @@ def default_resolver_registry() -> SecretResolverRegistry:
     return registry
 
 
+_CREDENTIAL_REF_ALLOWED_FIELDS = frozenset({"source", "name", "reference_id", "metadata"})
+
+
 def resolve_credential(
     credential_ref: SecretReference | dict[str, Any] | str | None,
     resolver_registry: SecretResolverRegistry | None = None,
@@ -142,6 +163,9 @@ def resolve_credential(
     if isinstance(credential_ref, SecretReference):
         reference = credential_ref
     elif isinstance(credential_ref, dict):
+        for key in credential_ref:
+            if key not in _CREDENTIAL_REF_ALLOWED_FIELDS:
+                raise ConfigurationError(f"credential_ref contains unknown field {key!r}")
         source = SecretSource(credential_ref.get("source", SecretSource.ENVIRONMENT.value))
         name = credential_ref.get("name") or credential_ref.get("reference_id", "")
         metadata = dict(credential_ref.get("metadata", {}))

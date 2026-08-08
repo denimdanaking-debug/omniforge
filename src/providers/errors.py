@@ -98,10 +98,18 @@ class ProviderError:
     def __post_init__(self) -> None:
         if not self.message:
             raise ValueError("ProviderError.message is required")
+        # Sanitize the canonical message so no raw secret-bearing provider text
+        # survives in the object. Callers must not be able to bypass redaction
+        # by reading ``message`` directly.
+        sanitized_message = redact(self.message)
+        object.__setattr__(self, "message", sanitized_message)
         if self.category is ErrorCategory.UNKNOWN:
             object.__setattr__(self, "category", _category_for_code(self.code))
-        if self.safe_diagnostic_message is None:
-            object.__setattr__(self, "safe_diagnostic_message", redact(self.message))
+        # Explicitly supplied diagnostics are also untrusted; redact them.
+        safe = self.safe_diagnostic_message
+        object.__setattr__(
+            self, "safe_diagnostic_message", redact(safe) if safe is not None else sanitized_message
+        )
         object.__setattr__(self, "raw_metadata", redact(self.raw_metadata))
 
     def is_infrastructure(self) -> bool:

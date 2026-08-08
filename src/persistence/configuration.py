@@ -9,25 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from src.routing.policy import ProjectRoutingPolicy, RoutingPin
+from src.security.redaction import SENSITIVE_STRUCTURED_KEYS, _normalize_key
 
 CURRENT_CONFIG_SCHEMA_VERSION = "1.1.0"
 SUPPORTED_CONFIG_SCHEMA_VERSIONS = frozenset({CURRENT_CONFIG_SCHEMA_VERSION})
 
 Migration = Callable[[dict[str, Any]], dict[str, Any]]
 _MIGRATIONS: dict[str, tuple[str, Migration]] = {}
-
-# Secret material must never be stored in normal configuration. These field names
-# are rejected unless they appear inside a typed SecretReference-shaped value.
-_SENSITIVE_FIELD_NAMES = frozenset(
-    {
-        "api_key",
-        "secret_key",
-        "access_token",
-        "bearer_token",
-        "client_secret",
-        "password",
-    }
-)
 
 
 class ConfigurationError(ValueError):
@@ -121,11 +109,23 @@ def migrate_config(config: Mapping[str, Any]) -> dict[str, Any]:
     return working
 
 
+_SECRET_REFERENCE_ALLOWED_FIELDS = frozenset({"source", "name", "reference_id", "metadata"})
+
+
 def _is_secret_reference(value: Any) -> bool:
-    """Return True if ``value`` is a dict shaped like a SecretReference."""
+    """Return True if ``value`` is a dict shaped exactly like a SecretReference."""
     if not isinstance(value, dict):
         return False
-    return "source" in value and ("name" in value or "reference_id" in value)
+    if not set(value.keys()).issubset(_SECRET_REFERENCE_ALLOWED_FIELDS):
+        return False
+    if "source" not in value:
+        return False
+    return "name" in value or "reference_id" in value
+
+
+def _is_sensitive_structured_key(key: Any) -> bool:
+    """Return True if ``key`` matches a canonical secret-bearing field name."""
+    return isinstance(key, str) and _normalize_key(key) in SENSITIVE_STRUCTURED_KEYS
 
 
 def _validate_no_raw_secrets(path: str, obj: Any) -> None:
@@ -134,8 +134,7 @@ def _validate_no_raw_secrets(path: str, obj: Any) -> None:
         for key, value in obj.items():
             if not isinstance(key, str):
                 continue
-            lowered = key.lower()
-            if lowered in _SENSITIVE_FIELD_NAMES and not _is_secret_reference(value):
+            if _is_sensitive_structured_key(key) and not _is_secret_reference(value):
                 raise RawSecretInConfigurationError(
                     f"raw secret field {key!r} at {path} is not allowed in normal configuration; "
                     "use a SecretReference via credential_ref"
@@ -147,11 +146,14 @@ def _validate_no_raw_secrets(path: str, obj: Any) -> None:
 
 
 def _validate_secret_reference(path: str, value: Any) -> None:
-    """Validate a credential_ref value."""
+    """Validate a credential_ref value against the SecretReference schema."""
     if value is None:
         return
     if not isinstance(value, dict):
         raise SecretValidationError(f"credential_ref at {path} must be a SecretReference object")
+    for key in value:
+        if key not in _SECRET_REFERENCE_ALLOWED_FIELDS:
+            raise SecretValidationError(f"credential_ref at {path} contains unknown field {key!r}")
     source = value.get("source")
     if source not in {"environment"}:
         raise SecretValidationError(f"credential_ref at {path} has unsupported source {source!r}")
@@ -160,6 +162,19 @@ def _validate_secret_reference(path: str, value: Any) -> None:
         raise SecretValidationError(
             f"credential_ref at {path} requires a non-empty name/reference_id"
         )
+    metadata = value.get("metadata")
+    if metadata is not None:
+        if not isinstance(metadata, dict):
+            raise SecretValidationError(f"credential_ref metadata at {path} must be an object")
+        for meta_key, meta_value in metadata.items():
+            if meta_key != "allow_empty":
+                raise SecretValidationError(
+                    f"credential_ref metadata at {path} contains unknown key {meta_key!r}"
+                )
+            if not isinstance(meta_value, bool):
+                raise SecretValidationError(
+                    f"credential_ref metadata.allow_empty at {path} must be a boolean"
+                )
 
 
 def _validate_pin(path: str, value: Any) -> RoutingPin:
@@ -270,10 +285,13 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
     project_policies = working.get("project_policies", {})
     if not isinstance(project_policies, dict):
         raise InvalidConfiguration("project_policies must be an object")
+    validated_policies: dict[str, dict[str, Any]] = {}
     for project_id, policy in project_policies.items():
         if not isinstance(project_id, str) or not project_id:
             raise InvalidConfiguration("project policy identifiers must be non-empty strings")
-        _validate_project_policy(f"project_policies.{project_id}", policy)
+        validated_policy = _validate_project_policy(f"project_policies.{project_id}", policy)
+        validated_policies[project_id] = validated_policy.to_dict()
+    working["project_policies"] = validated_policies
 
     return working
 
@@ -319,8 +337,5 @@ def extract_administrative_state(config: Mapping[str, Any]) -> dict[str, Any]:
         "routing_mode": working.get("routing_mode", "legacy"),
         "exploration_enabled": working.get("exploration_enabled", False),
         "pins": working.get("pins", {}),
-        "project_policies": {
-            project_id: policy.to_dict()
-            for project_id, policy in working.get("project_policies", {}).items()
-        },
+        "project_policies": copy.deepcopy(working.get("project_policies", {})),
     }

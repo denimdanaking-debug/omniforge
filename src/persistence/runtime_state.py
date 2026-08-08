@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from src.security.redaction import redact
 from src.security.secrets import SecretValue
 
 CURRENT_RUNTIME_STATE_VERSION = "1.1.0"
@@ -289,7 +290,10 @@ def save_runtime_state(path: str | Path, state: Mapping[str, Any]) -> None:
     destination = Path(path)
     validated = validate_runtime_state(state)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(validated, indent=2, sort_keys=True, default=_json_default) + "\n"
+    # Defense-in-depth redaction: ensure no secret-bearing string or structured
+    # field can survive into persisted runtime state.
+    safe_state = redact(validated)
+    payload = json.dumps(safe_state, indent=2, sort_keys=True, default=_json_default) + "\n"
 
     fd, temp_name = tempfile.mkstemp(
         prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent, text=True

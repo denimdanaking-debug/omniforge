@@ -78,6 +78,52 @@ def test_secret_value_wrapper_is_redacted() -> None:
     assert SENTINEL not in json.dumps(result, default=str)
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "password",
+        "PASSWORD",
+        "api_key",
+        "api-key",
+        "apiKey",
+        "API Key",
+        "secret_key",
+        "access_token",
+        "bearer_token",
+        "client_secret",
+        "authorization",
+        "Authorization",
+        "credentials",
+    ],
+)
+def test_redacts_sensitive_keys_regardless_of_value_shape(key: str) -> None:
+    payload = {key: SENTINEL}
+    result = redact(payload)
+    assert result[key] == "<redacted>"
+    assert SENTINEL not in json.dumps(result)
+
+
+def test_redacts_nested_sensitive_keys_in_lists() -> None:
+    payload = {"outer": [{"client_secret": SENTINEL}, {"password": SENTINEL}]}
+    result = redact(payload)
+    assert SENTINEL not in json.dumps(result)
+    assert result["outer"][0]["client_secret"] == "<redacted>"
+    assert result["outer"][1]["password"] == "<redacted>"
+
+
+def test_preserves_innocent_text_with_sensitive_words() -> None:
+    result = redact("This token represents a parser node")
+    assert "token represents a parser node" in result
+    result = redact("password policy requires 16 characters")
+    assert "password policy requires 16 characters" in result
+
+
+def test_normal_key_retains_non_secret_sentinel() -> None:
+    payload = {"normal": SENTINEL}
+    result = redact(payload)
+    assert result["normal"] == SENTINEL
+
+
 @pytest.mark.architecture
 def test_runtime_state_save_does_not_persist_resolved_secret() -> None:
     import tempfile

@@ -134,6 +134,45 @@ def test_resolve_credential_returns_none_for_none() -> None:
     assert resolve_credential(None) is None
 
 
+def test_secret_reference_rejects_arbitrary_metadata() -> None:
+    with pytest.raises(ValueError, match="unknown key"):
+        SecretReference(
+            source=SecretSource.ENVIRONMENT,
+            name="OPENAI_API_KEY",
+            metadata={"password": SENTINEL},
+        )
+
+
+def test_secret_reference_metadata_allow_empty_must_be_boolean() -> None:
+    with pytest.raises(ValueError, match="boolean"):
+        SecretReference(
+            source=SecretSource.ENVIRONMENT,
+            name="OPENAI_API_KEY",
+            metadata={"allow_empty": "yes"},
+        )
+
+
+def test_secret_reference_allows_empty_metadata() -> None:
+    ref = SecretReference(source=SecretSource.ENVIRONMENT, name="OPENAI_API_KEY")
+    assert ref.metadata == {}
+
+
+def test_resolve_credential_rejects_unknown_fields() -> None:
+    with pytest.raises(ConfigurationError, match="unknown field"):
+        resolve_credential({"source": "environment", "name": "X", "password": SENTINEL})
+
+
+def test_resolve_credential_rejects_metadata_smuggling() -> None:
+    with pytest.raises(ValueError, match="unknown key"):
+        resolve_credential(
+            {
+                "source": "environment",
+                "name": "X",
+                "metadata": {"password": SENTINEL},
+            }
+        )
+
+
 class _ConstantResolver:
     def __init__(self, value: str) -> None:
         self._value = value
