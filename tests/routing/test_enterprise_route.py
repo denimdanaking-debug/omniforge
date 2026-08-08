@@ -26,6 +26,16 @@ def _route_identity() -> InferenceRouteIdentity:
     )
 
 
+def _direct_route() -> InferenceRouteIdentity:
+    return InferenceRouteIdentity(
+        route_id="anthropic-direct-claude",
+        provider_id="anthropic",
+        route_type=RouteType.DIRECT,
+        endpoint_key="https://api.anthropic.com/v1",
+        failure_domain="anthropic.com",
+    )
+
+
 @pytest.mark.architecture
 async def test_all_platforms_are_representable_as_data() -> None:
     for platform in EnterprisePlatform:
@@ -135,3 +145,44 @@ def test_enterprise_module_has_no_sdk_imports() -> None:
         if stripped.startswith(("import ", "from ")):
             for prefix in forbidden_sdk_prefixes:
                 assert prefix not in stripped, f"enterprise module imports SDK: {stripped}"
+
+
+@pytest.mark.architecture
+def test_enterprise_config_requires_enterprise_route() -> None:
+    with pytest.raises(ValueError, match="EnterpriseRouteConfig requires RouteType.ENTERPRISE"):
+        EnterpriseRouteConfig(
+            route_identity=_direct_route(),
+            platform=EnterprisePlatform.AWS_BEDROCK,
+        )
+
+
+@pytest.mark.architecture
+def test_enterprise_config_rejects_gateway_route() -> None:
+    gateway_route = InferenceRouteIdentity(
+        route_id="openrouter-claude",
+        provider_id="openrouter",
+        route_type=RouteType.GATEWAY,
+        endpoint_key="openrouter://anthropic/claude-sonnet",
+        failure_domain="openrouter.ai",
+    )
+    with pytest.raises(ValueError, match="EnterpriseRouteConfig requires RouteType.ENTERPRISE"):
+        EnterpriseRouteConfig(
+            route_identity=gateway_route,
+            platform=EnterprisePlatform.AWS_BEDROCK,
+        )
+
+
+@pytest.mark.architecture
+def test_enterprise_config_rejects_local_route() -> None:
+    local_route = InferenceRouteIdentity(
+        route_id="ollama-qwen",
+        provider_id="local-ollama",
+        route_type=RouteType.LOCAL,
+        endpoint_key="http://localhost:11434/v1",
+        failure_domain="localhost:11434",
+    )
+    with pytest.raises(ValueError, match="EnterpriseRouteConfig requires RouteType.ENTERPRISE"):
+        EnterpriseRouteConfig(
+            route_identity=local_route,
+            platform=EnterprisePlatform.AWS_BEDROCK,
+        )

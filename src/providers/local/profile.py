@@ -13,7 +13,7 @@ from enum import StrEnum
 from typing import Any
 
 from src.routing.capabilities import DeploymentMode
-from src.routing.inference_route import InferenceRouteIdentity
+from src.routing.inference_route import InferenceRouteIdentity, RouteType
 
 
 class LocalRuntimeKind(StrEnum):
@@ -48,6 +48,15 @@ class LocalEndpointProfile:
             raise ValueError("base_url must be non-empty")
         if not self.failure_domain.strip():
             raise ValueError("failure_domain must be non-empty")
+        if self.route_identity.route_type is not RouteType.LOCAL:
+            raise ValueError(
+                f"LocalEndpointProfile requires RouteType.LOCAL, got {self.route_identity.route_type.value}"
+            )
+        if self.failure_domain != self.route_identity.failure_domain:
+            raise ValueError(
+                "LocalEndpointProfile.failure_domain must match route_identity.failure_domain: "
+                f"{self.failure_domain!r} != {self.route_identity.failure_domain!r}"
+            )
 
     @property
     def deployment_mode(self) -> DeploymentMode:

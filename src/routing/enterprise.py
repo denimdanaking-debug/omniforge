@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from src.routing.inference_route import InferenceRouteIdentity
+from src.routing.inference_route import InferenceRouteIdentity, RouteType
 
 
 class EnterprisePlatform(StrEnum):
@@ -45,6 +45,11 @@ class EnterpriseRouteConfig:
     def __post_init__(self) -> None:
         if self.route_identity is None:
             raise ValueError("route_identity is required")
+        if self.route_identity.route_type is not RouteType.ENTERPRISE:
+            raise ValueError(
+                "EnterpriseRouteConfig requires RouteType.ENTERPRISE, got "
+                f"{self.route_identity.route_type.value}"
+            )
         if not self.platform.value.strip():
             raise ValueError("platform must be non-empty")
 

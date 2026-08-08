@@ -24,6 +24,20 @@ DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 _OPENROUTER_PROVIDER_IDENTITY = ProviderIdentity("openrouter", "OpenRouter", "openrouter.ai")
 
 
+# Conservative default for an unknown underlying model routed through OpenRouter.
+# OpenRouter is the transport route; it must not be treated as a source of model
+# capability truth.
+_DEFAULT_MODEL_CAPABILITIES = ModelCapabilities(
+    context_tokens=4096,
+    structured_output=False,
+    tool_use=False,
+    streaming=False,
+    reasoning=False,
+    code_generation=False,
+    multimodal=False,
+)
+
+
 def _default_route_identity() -> InferenceRouteIdentity:
     """Return the canonical OpenRouter gateway route identity."""
     return InferenceRouteIdentity(
@@ -42,6 +56,11 @@ class OpenRouterAdapter(OpenAICompatibleAdapter):
     Qwen, DeepSeek). The OpenRouter gateway is represented by ``route_id``.
     This keeps model reputation evidence attached to the actual model while
     allowing route-specific failure attribution.
+
+    The route identity must be a GATEWAY route. OpenRouter is categorically a
+    gateway, not a direct/local/enterprise provider. The underlying model's
+    capabilities must be supplied explicitly; the adapter will not infer them
+    from the existence of the OpenRouter route.
     """
 
     def __init__(
@@ -53,18 +72,41 @@ class OpenRouterAdapter(OpenAICompatibleAdapter):
         api_key: str | None = None,
         base_url: str | None = None,
         capabilities: Any = None,
+        model_descriptor: ModelDescriptor | None = None,
+        model_capabilities: ModelCapabilities | None = None,
     ) -> None:
+        resolved_route = route_identity or _default_route_identity()
+        if resolved_route.route_type is not RouteType.GATEWAY:
+            raise ValueError(
+                f"OpenRouter route must be RouteType.GATEWAY, got {resolved_route.route_type.value}"
+            )
+
+        if model_capabilities is not None:
+            self._model_capabilities = model_capabilities
+        elif model_descriptor is not None:
+            self._model_capabilities = model_descriptor.to_capabilities()
+        else:
+            self._model_capabilities = _DEFAULT_MODEL_CAPABILITIES
+
+        # Keep a descriptor around for internal consistency; it reflects the
+        # supplied underlying-model capabilities, not OpenRouter defaults.
         self._descriptor = ModelDescriptor(
             model_id=model_identity.model_id,
             family=model_identity.family,
             lifecycle=model_identity.lifecycle,
-            context_tokens=128_000,
-            supported_roles=frozenset(),
+            context_tokens=self._model_capabilities.context_tokens,
+            structured_output=self._model_capabilities.structured_output,
+            tool_use=self._model_capabilities.tool_use,
+            streaming=self._model_capabilities.streaming,
+            reasoning=self._model_capabilities.reasoning,
+            code_generation=self._model_capabilities.code_generation,
+            multimodal=self._model_capabilities.multimodal,
+            supported_roles=self._model_capabilities.supported_roles,
         )
         super().__init__(
             provider_id=provider_identity,
             model_id=model_identity,
-            route_id=route_identity or _default_route_identity(),
+            route_id=resolved_route,
             api_key=api_key,
             base_url=base_url or DEFAULT_BASE_URL,
             capabilities=capabilities,
@@ -72,13 +114,8 @@ class OpenRouterAdapter(OpenAICompatibleAdapter):
 
     @property
     def model_capabilities(self) -> ModelCapabilities:
-        """Return canonical capabilities for the configured model.
-
-        OpenRouter exposes many models; capabilities should be supplied explicitly
-        via ``model_descriptor`` or inherited from the model identity's metadata
-        when available. By default we return a conservative cloud profile.
-        """
-        return self._descriptor.to_capabilities()
+        """Return canonical capabilities for the configured underlying model."""
+        return self._model_capabilities
 
     def _build_chat_params(self, request: ProviderRequest) -> dict[str, Any]:
         params = super()._build_chat_params(request)

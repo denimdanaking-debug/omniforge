@@ -115,11 +115,14 @@ def _mock_adapter(adapter: Any) -> Any:
 
 @pytest.mark.fleet
 async def test_same_model_via_direct_and_openrouter() -> None:
-    direct = OpenRouterAdapter(
+    # The direct side uses a real direct-route adapter, not OpenRouter.
+    direct = GenericOpenAICompatibleAdapter(
         provider_identity=_anthropic_identity(),
         model_identity=_claude_identity(),
         route_identity=_direct_route(),
+        base_url="https://api.anthropic.com/v1",
         api_key="test-key",
+        capabilities=ProviderAdapterCapabilities(streaming=True),
     )
     gateway = OpenRouterAdapter(
         provider_identity=_anthropic_identity(),
@@ -137,7 +140,10 @@ async def test_same_model_via_direct_and_openrouter() -> None:
     assert direct_response.model_id == gateway_response.model_id == _claude_identity()
     assert direct_response.route_id == _direct_route()
     assert gateway_response.route_id == _openrouter_route()
+    assert direct_response.route_id != gateway_response.route_id
     assert direct_response.provider_id == gateway_response.provider_id == _anthropic_identity()
+    assert direct_response.error_reference is None
+    assert gateway_response.error_reference is None
 
 
 @pytest.mark.fleet
@@ -259,13 +265,12 @@ def test_enterprise_route_coexists_with_other_route_types() -> None:
         underlying_provider_id="anthropic",
         underlying_model_id="claude-sonnet-4-20250514",
     )
-    direct_config = EnterpriseRouteConfig(
-        route_identity=_direct_route(),
-        platform=EnterprisePlatform.AZURE_AI,
-        region="westus2",
-    )
+    # Direct routes are represented by their own InferenceRouteIdentity, not by
+    # wrapping them in an EnterpriseRouteConfig.
+    direct_route = _direct_route()
     assert enterprise_config.route_identity.route_type is RouteType.ENTERPRISE
-    assert direct_config.route_identity.route_type is RouteType.DIRECT
+    assert direct_route.route_type is RouteType.DIRECT
+    assert enterprise_config.route_identity != direct_route
 
 
 @pytest.mark.architecture

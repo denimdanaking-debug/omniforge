@@ -258,3 +258,67 @@ async def test_no_network_at_import() -> None:
     module = importlib.import_module("src.providers.local.adapter")
     # The adapter construction below is explicit; module import itself did not probe.
     assert module is not None
+
+
+async def test_local_profile_requires_local_route() -> None:
+    with pytest.raises(ValueError, match="LocalEndpointProfile requires RouteType.LOCAL"):
+        LocalEndpointProfile(
+            runtime_kind=LocalRuntimeKind.OLLAMA,
+            base_url="http://localhost:11434/v1",
+            route_identity=InferenceRouteIdentity(
+                route_id="anthropic-direct-claude",
+                provider_id="anthropic",
+                route_type=RouteType.DIRECT,
+                endpoint_key="https://api.anthropic.com/v1",
+                failure_domain="anthropic.com",
+            ),
+            failure_domain="anthropic.com",
+        )
+
+
+async def test_local_profile_rejects_gateway_route() -> None:
+    with pytest.raises(ValueError, match="LocalEndpointProfile requires RouteType.LOCAL"):
+        LocalEndpointProfile(
+            runtime_kind=LocalRuntimeKind.OLLAMA,
+            base_url="http://localhost:11434/v1",
+            route_identity=InferenceRouteIdentity(
+                route_id="openrouter-claude",
+                provider_id="openrouter",
+                route_type=RouteType.GATEWAY,
+                endpoint_key="openrouter://anthropic/claude-sonnet",
+                failure_domain="openrouter.ai",
+            ),
+            failure_domain="openrouter.ai",
+        )
+
+
+async def test_local_profile_rejects_enterprise_route() -> None:
+    with pytest.raises(ValueError, match="LocalEndpointProfile requires RouteType.LOCAL"):
+        LocalEndpointProfile(
+            runtime_kind=LocalRuntimeKind.OLLAMA,
+            base_url="http://localhost:11434/v1",
+            route_identity=InferenceRouteIdentity(
+                route_id="bedrock-claude",
+                provider_id="aws",
+                route_type=RouteType.ENTERPRISE,
+                endpoint_key="bedrock://us-east-1/anthropic.claude-3-sonnet",
+                failure_domain="us-east-1.bedrock.amazonaws.com",
+            ),
+            failure_domain="us-east-1.bedrock.amazonaws.com",
+        )
+
+
+async def test_local_profile_requires_failure_domain_consistency() -> None:
+    with pytest.raises(ValueError, match="failure_domain must match route_identity.failure_domain"):
+        LocalEndpointProfile(
+            runtime_kind=LocalRuntimeKind.OLLAMA,
+            base_url="http://localhost:11434/v1",
+            route_identity=InferenceRouteIdentity(
+                route_id="ollama-qwen",
+                provider_id="local-ollama",
+                route_type=RouteType.LOCAL,
+                endpoint_key="http://localhost:11434/v1",
+                failure_domain="localhost:11434",
+            ),
+            failure_domain="mismatched-domain",
+        )
