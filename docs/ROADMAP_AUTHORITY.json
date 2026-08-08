@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0.0",
+  "roadmap_path": "docs/OMNIFORGE_FULL_ROADMAP_v1.0.md",
+  "roadmap_version": "1.0",
+  "verified_step_count": 413,
+  "sha256": "336c0b64e0a190dd3edb46d8e3b29e22ffff12f80e7e2ee26d537e814dd3bded",
+  "workspace_manager_included": true,
+  "kimi_k3_initial_status": "HIGH_RISK",
+  "qwen_3_8_max_initial_status": "HIGH_RISK",
+  "authority_rule": "Only reviewed, deterministically validated, safely integrated work may advance authoritative progress."
+}
