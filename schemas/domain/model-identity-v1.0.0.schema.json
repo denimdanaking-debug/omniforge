@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omniforge.dev/schemas/domain/model-identity-v1.0.0.schema.json",
+  "title": "OmniForge Model Identity v1.0.0",
+  "type": "object",
+  "required": ["model_id", "family", "capability_metadata", "lifecycle"],
+  "additionalProperties": true,
+  "properties": {
+    "model_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._:/-]{1,127}$"
+    },
+    "family": {"type": "string", "minLength": 1},
+    "version": {"type": ["string", "null"]},
+    "revision": {"type": ["string", "null"]},
+    "capability_metadata": {"type": "object", "additionalProperties": true},
+    "lifecycle": {
+      "type": "string",
+      "enum": ["SHADOW", "LOW_RISK", "NORMAL", "HIGH_RISK", "DISABLED"]
+    }
+  }
+}
