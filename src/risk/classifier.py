@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from src.policy.risk import RiskLevel
@@ -111,16 +111,19 @@ class InitialRiskClassifier:
         if min_factor is not None:
             factors.append(min_factor)
 
-        # Runtime escalation events.
-        if request.runtime_events:
-            events = self._coerce_events(request.runtime_events)
+        # Runtime escalation events. Coerce once and use the canonical tuple for
+        # both escalation and fingerprinting so the audit input matches the
+        # decision inputs exactly.
+        events = self._coerce_events(request.runtime_events)
+        if events:
             risk, _records = self.runtime_escalator.apply_all(risk, events)
 
         # Final determinism: sort factors by code and evidence for stable output.
         factors = sorted(factors, key=lambda f: (f.code.value, f.evidence))
 
+        fingerprint_request = replace(request, runtime_events=events)
         decision_inputs = RiskDecisionInputs(
-            request=request,
+            request=fingerprint_request,
             project_policy=self.project_policy,
             authority_policy=self.authority_policy,
             security_policy=self.security_policy,
