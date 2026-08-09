@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 from src.policy.risk import RiskLevel
@@ -121,14 +121,14 @@ class InitialRiskClassifier:
         # Final determinism: sort factors by code and evidence for stable output.
         factors = sorted(factors, key=lambda f: (f.code.value, f.evidence))
 
-        fingerprint_request = replace(request, runtime_events=events)
         decision_inputs = RiskDecisionInputs(
-            request=fingerprint_request,
+            request=request,
             project_policy=self.project_policy,
             authority_policy=self.authority_policy,
             security_policy=self.security_policy,
             architecture_thresholds=self.architecture_detector._thresholds,
             runtime_escalator=self.runtime_escalator,
+            normalized_runtime_events=events,
         )
         fingerprint = risk_assessment_fingerprint(decision_inputs)
         explanation = format_explanation(

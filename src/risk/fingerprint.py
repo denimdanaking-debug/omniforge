@@ -49,6 +49,7 @@ class RiskDecisionInputs:
     security_policy: SecuritySensitivePolicy
     architecture_thresholds: ArchitectureThresholds
     runtime_escalator: RuntimeRiskEscalator
+    normalized_runtime_events: tuple[RiskRuntimeEvent, ...] = ()
 
 
 def _effective_event_threshold(event: RiskRuntimeEvent, escalator: RuntimeRiskEscalator) -> int:
@@ -113,7 +114,10 @@ def risk_assessment_fingerprint(inputs: RiskDecisionInputs) -> str:
         "explicit_paths": sorted(normalize_repo_path(p) for p in request.explicit_paths),
         "baseline_risk": request.baseline_risk.value if request.baseline_risk else None,
         "runtime_events": sorted(
-            (_normalize_runtime_event(e, inputs.runtime_escalator) for e in request.runtime_events),
+            (
+                _normalize_runtime_event(e, inputs.runtime_escalator)
+                for e in inputs.normalized_runtime_events
+            ),
             key=lambda d: json.dumps(d, sort_keys=True),
         ),
         "project_policy": _canonical_value(inputs.project_policy.to_dict()),

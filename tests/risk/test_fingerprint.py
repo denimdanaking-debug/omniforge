@@ -56,6 +56,7 @@ def _inputs(
         security_policy=security_policy,
         architecture_thresholds=architecture_thresholds,
         runtime_escalator=runtime_escalator,
+        normalized_runtime_events=tuple(request.runtime_events),
     )
 
 
@@ -249,6 +250,7 @@ def test_empty_request_policy_with_custom_effective_policy() -> None:
             authority_policy=custom_policy.authority_policy,
             security_policy=custom_policy.security_policy,
         ),
+        normalized_runtime_events=(),
     )
     inputs_default = _inputs(req)
     assert risk_assessment_fingerprint(inputs_custom) != risk_assessment_fingerprint(inputs_default)
@@ -274,6 +276,7 @@ def test_runtime_threshold_differs_in_fingerprint() -> None:
         security_policy=SecuritySensitivePolicy.default(),
         architecture_thresholds=ArchitectureThresholds.default(),
         runtime_escalator=RuntimeRiskEscalator(test_failure_threshold=3),
+        normalized_runtime_events=req.runtime_events,
     )
     inputs_threshold_5 = RiskDecisionInputs(
         request=req,
@@ -282,6 +285,7 @@ def test_runtime_threshold_differs_in_fingerprint() -> None:
         security_policy=SecuritySensitivePolicy.default(),
         architecture_thresholds=ArchitectureThresholds.default(),
         runtime_escalator=RuntimeRiskEscalator(test_failure_threshold=5),
+        normalized_runtime_events=req.runtime_events,
     )
     assert risk_assessment_fingerprint(inputs_threshold_3) != risk_assessment_fingerprint(
         inputs_threshold_5
@@ -323,6 +327,7 @@ def test_caller_event_threshold_ignored_in_fingerprint() -> None:
         security_policy=SecuritySensitivePolicy.default(),
         architecture_thresholds=ArchitectureThresholds.default(),
         runtime_escalator=RuntimeRiskEscalator(test_failure_threshold=3),
+        normalized_runtime_events=req_low.runtime_events,
     )
     inputs_high = RiskDecisionInputs(
         request=req_high,
@@ -331,14 +336,16 @@ def test_caller_event_threshold_ignored_in_fingerprint() -> None:
         security_policy=SecuritySensitivePolicy.default(),
         architecture_thresholds=ArchitectureThresholds.default(),
         runtime_escalator=RuntimeRiskEscalator(test_failure_threshold=3),
+        normalized_runtime_events=req_high.runtime_events,
     )
     assert risk_assessment_fingerprint(inputs_low) == risk_assessment_fingerprint(inputs_high)
 
 
 def test_fingerprint_changes_with_event_count_threshold_crossing() -> None:
     """Below-threshold and at-threshold counts produce different fingerprints."""
-    base_inputs = lambda count: RiskDecisionInputs(  # noqa: E731
-        request=_request(
+
+    def base_inputs(count: int) -> RiskDecisionInputs:
+        req = _request(
             changed_files=("src/foo.py",),
             runtime_events=(
                 RiskRuntimeEvent(
@@ -348,13 +355,17 @@ def test_fingerprint_changes_with_event_count_threshold_crossing() -> None:
                     count=count,
                 ),
             ),
-        ),
-        project_policy=ProjectRiskPolicy.default(),
-        authority_policy=AuthoritySensitivePolicy.default(),
-        security_policy=SecuritySensitivePolicy.default(),
-        architecture_thresholds=ArchitectureThresholds.default(),
-        runtime_escalator=RuntimeRiskEscalator(test_failure_threshold=3),
-    )
+        )
+        return RiskDecisionInputs(
+            request=req,
+            project_policy=ProjectRiskPolicy.default(),
+            authority_policy=AuthoritySensitivePolicy.default(),
+            security_policy=SecuritySensitivePolicy.default(),
+            architecture_thresholds=ArchitectureThresholds.default(),
+            runtime_escalator=RuntimeRiskEscalator(test_failure_threshold=3),
+            normalized_runtime_events=req.runtime_events,
+        )
+
     assert risk_assessment_fingerprint(base_inputs(2)) != risk_assessment_fingerprint(
         base_inputs(3)
     )

@@ -142,6 +142,7 @@ def test_runtime_events_affect_input_fingerprint() -> None:
             security_policy=SecuritySensitivePolicy.default(),
             architecture_thresholds=ArchitectureThresholds.default(),
             runtime_escalator=RuntimeRiskEscalator.default(),
+            normalized_runtime_events=tuple(request.runtime_events),
         )
 
     base = RiskAssessmentRequest(

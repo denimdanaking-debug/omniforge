@@ -388,3 +388,103 @@ def test_dict_test_failure_engine_threshold_change_changes_fingerprint() -> None
     assert r3.fingerprint != r5.fingerprint
     assert r3.final_risk == RiskLevel.R3_HIGH
     assert r5.final_risk == RiskLevel.R1_LOW
+
+
+def test_typed_and_dict_runtime_events_equivalent() -> None:
+    """A typed RiskRuntimeEvent and an equivalent dict event must produce the same
+    final risk and fingerprint."""
+    from src.risk import RiskRuntimeEvent, RiskRuntimeEventType
+
+    classifier = InitialRiskClassifier.default()
+    typed = _request(
+        changed_files=("src/foo.py",),
+        runtime_events=(
+            RiskRuntimeEvent(
+                event_type=RiskRuntimeEventType.TEST_FAILURE,
+                material=True,
+                evidence="failures",
+                count=3,
+                threshold=99,
+            ),
+        ),
+    )
+    dict_form = _request(
+        changed_files=("src/foo.py",),
+        runtime_events=(
+            {
+                "event_type": "test_failure",
+                "material": True,
+                "evidence": "failures",
+                "count": 3,
+                "threshold": 99,
+            },
+        ),
+    )
+    r_typed = classifier.classify(typed)
+    r_dict = classifier.classify(dict_form)
+    assert r_typed.final_risk == r_dict.final_risk == RiskLevel.R3_HIGH
+    assert r_typed.fingerprint == r_dict.fingerprint
+
+
+def test_dict_repair_loop_engine_threshold_change_changes_fingerprint() -> None:
+    base = _request(
+        changed_files=("src/foo.py",),
+        runtime_events=(
+            {
+                "event_type": "repair_loop",
+                "material": True,
+                "evidence": "repairs",
+                "count": 3,
+                "threshold": 1,
+            },
+        ),
+    )
+    classifier_t3 = InitialRiskClassifier.default()
+    classifier_t5 = replace(
+        classifier_t3,
+        runtime_escalator=RuntimeRiskEscalator(
+            repair_loop_threshold=5,
+            authority_policy=classifier_t3.authority_policy,
+            security_policy=classifier_t3.security_policy,
+        ),
+    )
+    r3 = classifier_t3.classify(base)
+    r5 = classifier_t5.classify(base)
+    assert r3.fingerprint != r5.fingerprint
+    assert r3.final_risk == RiskLevel.R3_HIGH
+    assert r5.final_risk == RiskLevel.R1_LOW
+
+
+def test_dict_test_failure_count_threshold_crossing_changes_fingerprint() -> None:
+    """A count below the engine threshold versus at/above it must produce different
+    fingerprints and different escalation results."""
+    classifier = InitialRiskClassifier.default()
+    below = _request(
+        changed_files=("src/foo.py",),
+        runtime_events=(
+            {
+                "event_type": "test_failure",
+                "material": True,
+                "evidence": "failures",
+                "count": 2,
+                "threshold": 1,
+            },
+        ),
+    )
+    at_threshold = _request(
+        changed_files=("src/foo.py",),
+        runtime_events=(
+            {
+                "event_type": "test_failure",
+                "material": True,
+                "evidence": "failures",
+                "count": 3,
+                "threshold": 1,
+            },
+        ),
+    )
+    r_below = classifier.classify(below)
+    r_at = classifier.classify(at_threshold)
+    assert r_below.fingerprint != r_at.fingerprint
+    assert r_below.final_risk == RiskLevel.R1_LOW
+    assert r_at.final_risk == RiskLevel.R3_HIGH
