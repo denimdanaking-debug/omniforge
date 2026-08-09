@@ -51,6 +51,7 @@ class ProjectRoutingPolicy:
     minimum_review_independence: str | None = None
     allow_exploration: bool | None = None
     routing_mode_override: str | None = None
+    risk_policy: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         valid_independence = {None, "same_provider", "same_model", "independent"}
@@ -64,6 +65,8 @@ class ProjectRoutingPolicy:
             "dynamic",
         }:
             raise ValueError("routing_mode_override must be 'legacy' or 'dynamic'")
+        if not isinstance(self.risk_policy, dict):
+            raise ValueError("risk_policy must be a dict")
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> ProjectRoutingPolicy:
@@ -76,6 +79,7 @@ class ProjectRoutingPolicy:
             minimum_review_independence=raw.get("minimum_review_independence"),
             allow_exploration=raw.get("allow_exploration"),
             routing_mode_override=raw.get("routing_mode_override"),
+            risk_policy=raw.get("risk_policy", {}),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -94,6 +98,8 @@ class ProjectRoutingPolicy:
             result["allow_exploration"] = self.allow_exploration
         if self.routing_mode_override is not None:
             result["routing_mode_override"] = self.routing_mode_override
+        if self.risk_policy:
+            result["risk_policy"] = self.risk_policy
         return result
 
 
