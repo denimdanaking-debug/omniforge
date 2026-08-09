@@ -5,11 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 from src.context._utils import deterministic_sort, hash_text, normalize_path
-from src.context.budget import compute_usable_budget
+from src.context.budget import ContextBudgetError, compute_usable_budget
 from src.context.hierarchical import DeterministicTestSummarizer, Summarizer
 from src.context.provenance import ProvenanceIndex
 from src.context.schema import (
     AcceptanceCriterion,
+    AuthorityContextItem,
     AuthorityPresence,
     ContextPacket,
     ContextSummary,
@@ -21,9 +22,73 @@ from src.context.schema import (
     TaskMetadata,
     TestEvidence,
 )
-from src.context.strategy import ContextBuildRequest, ContextStrategy, ContextStrategyResult
+from src.context.strategy import (
+    ContextBuildRequest,
+    ContextStrategy,
+    ContextStrategyResult,
+    _authority_items_from_request,
+)
 from src.context.targeted import _provenance_coverage
 from src.context.telemetry import ContextStrategyTelemetry
+
+
+def _allocate_authority_items(
+    authority_items: tuple[AuthorityContextItem, ...],
+    usable_chars: int,
+    max_items: int | None,
+    consumed: int,
+    item_count: int,
+) -> tuple[list[AuthorityContextItem], int, int, int]:
+    """Allocate authority items first, falling back to RAW_REFERENCED when needed."""
+    authority: list[AuthorityContextItem] = []
+    raw_count = 0
+    for item in authority_items:
+        if item.raw_included:
+            chars = len(item.content) if item.content else 0
+            fits = (max_items is None or item_count + 1 <= max_items) and (
+                consumed + chars <= usable_chars
+            )
+            if fits:
+                authority.append(item)
+                consumed += chars
+                item_count += 1
+                raw_count += 1
+            else:
+                if item.revision and item.content_hash:
+                    authority.append(
+                        AuthorityContextItem(
+                            authority_id=item.authority_id,
+                            provenance_id=item.provenance_id,
+                            full_source_ref=item.full_source_ref,
+                            revision=item.revision,
+                            content_hash=item.content_hash,
+                            content=None,
+                            raw_included=False,
+                        )
+                    )
+                else:
+                    raise ContextBudgetError(
+                        f"Authority item {item.authority_id!r} cannot fit in budget and lacks "
+                        "revision/content_hash for reference"
+                    )
+        else:
+            if not item.revision or not item.content_hash:
+                raise ValueError(
+                    f"Authority item {item.authority_id!r} marked raw_included=False but missing "
+                    "revision or content_hash"
+                )
+            authority.append(
+                AuthorityContextItem(
+                    authority_id=item.authority_id,
+                    provenance_id=item.provenance_id,
+                    full_source_ref=item.full_source_ref,
+                    revision=item.revision,
+                    content_hash=item.content_hash,
+                    content=None,
+                    raw_included=False,
+                )
+            )
+    return authority, consumed, item_count, raw_count
 
 
 class HybridContextStrategy(ContextStrategy):
@@ -46,18 +111,33 @@ class HybridContextStrategy(ContextStrategy):
         max_items = request.budget.max_items
 
         provenance_index = ProvenanceIndex()
+
+        # Authority is always raw or referenced first.
+        authority_items = _authority_items_from_request(request)
+        for item in authority_items:
+            provenance_index.register(
+                item.provenance_id,
+                ProvenanceRef(
+                    source_type="authority",
+                    path=item.full_source_ref,
+                    authority_level="roadmap",
+                    revision=item.revision or None,
+                    content_hash=item.content_hash or None,
+                ),
+            )
+
+        consumed = 0
+        item_count = 0
+        authority, consumed, item_count, raw_authority_count = _allocate_authority_items(
+            authority_items, usable_chars, max_items, consumed, item_count
+        )
+
+        first_authority_provenance_id = (
+            authority_items[0].provenance_id if authority_items else None
+        )
+
         raw_items: list[tuple[Any, int, str, str]] = []
         summary_candidates: list[Any] = []
-
-        # Authority is always raw and never summarized.
-        for idx, ref in enumerate(deterministic_sort(request.authority_refs, key=str)):
-            source_id = f"authority-{idx}"
-            text = str(ref)
-            provenance_index.register(
-                source_id,
-                ProvenanceRef(source_type="authority", path=text, authority_level="roadmap"),
-            )
-            raw_items.append((text, len(text), source_id, "authority"))
 
         # Acceptance criteria are raw.
         for idx, constraint in enumerate(request.constraints):
@@ -65,7 +145,9 @@ class HybridContextStrategy(ContextStrategy):
             criterion = AcceptanceCriterion(
                 criterion_id=criterion_id,
                 text=constraint,
-                authority_refs=("authority-0",) if request.authority_refs else (),
+                authority_refs=(first_authority_provenance_id,)
+                if first_authority_provenance_id
+                else (),
             )
             provenance_index.register(
                 criterion_id,
@@ -165,16 +247,13 @@ class HybridContextStrategy(ContextStrategy):
             )
 
         # Add raw items by priority until budget pressure.
-        authority: list[str] = []
         acceptance_criteria: list[AcceptanceCriterion] = []
         current_diff: list[DiffInfo] = []
         test_evidence: list[TestEvidence] = []
         exclusions: list[Exclusion] = []
-        consumed = 0
-        item_count = 0
         truncation_events: list[str] = []
 
-        priority_order = ["authority", "criterion", "diff", "test"]
+        priority_order = ["criterion", "diff", "test"]
         for priority in priority_order:
             for item, chars, source_id, category in raw_items:
                 if category != priority:
@@ -203,9 +282,7 @@ class HybridContextStrategy(ContextStrategy):
                     continue
                 consumed += chars
                 item_count += 1
-                if category == "authority":
-                    authority.append(str(item))
-                elif category == "criterion":
+                if category == "criterion":
                     acceptance_criteria.append(item)
                 elif category == "diff":
                     current_diff.append(item)
@@ -213,7 +290,7 @@ class HybridContextStrategy(ContextStrategy):
                     test_evidence.append(item)
 
         # Add summary last; drop lower-priority raw items if needed already handled above.
-        summary_count = 0
+        summaries: list[ContextSummary] = []
         if summary is not None:
             summary_chars = len(summary.text) + 20
             if (
@@ -221,7 +298,7 @@ class HybridContextStrategy(ContextStrategy):
             ) and consumed + summary_chars <= usable_chars:
                 consumed += summary_chars
                 item_count += 1
-                summary_count = 1
+                summaries.append(summary)
             else:
                 exclusions.append(
                     Exclusion(
@@ -233,9 +310,14 @@ class HybridContextStrategy(ContextStrategy):
                 )
                 truncation_events.append("budget_exceeded:summary")
 
-        authority_presence = (
-            AuthorityPresence.RAW_INCLUDED if authority else AuthorityPresence.NOT_REQUIRED
-        )
+        if authority_items:
+            authority_presence = (
+                AuthorityPresence.RAW_INCLUDED
+                if raw_authority_count > 0
+                else AuthorityPresence.RAW_REFERENCED
+            )
+        else:
+            authority_presence = AuthorityPresence.NOT_REQUIRED
 
         task_metadata = TaskMetadata(
             task_id=request.task_id,
@@ -244,9 +326,13 @@ class HybridContextStrategy(ContextStrategy):
             requested_objective=request.requested_objective,
             constraints=request.constraints,
         )
+        provenance_index.register(
+            task_metadata.task_id,
+            ProvenanceRef(source_type="task_metadata", path=task_metadata.task_id),
+        )
 
         raw_item_count = (
-            len(authority) + len(acceptance_criteria) + len(current_diff) + len(test_evidence)
+            raw_authority_count + len(acceptance_criteria) + len(current_diff) + len(test_evidence)
         )
 
         packet = ContextPacket(
@@ -255,27 +341,27 @@ class HybridContextStrategy(ContextStrategy):
             acceptance_criteria=tuple(acceptance_criteria),
             current_diff=tuple(current_diff),
             test_evidence=tuple(test_evidence),
+            summaries=tuple(summaries),
             task_metadata=task_metadata,
             exclusions=tuple(exclusions),
             provenance_index=dict(provenance_index._refs),
             authority_presence=authority_presence,
             raw_item_count=raw_item_count,
-            summary_count=summary_count,
+            summary_count=len(summaries),
             estimated_input_chars=consumed,
             budget={
                 "usable_chars": usable_chars,
                 "reserved": budget_result.reserved,
                 "total": budget_result.total_budget,
             },
-            payload={"summary": summary.to_dict() if summary else None},
         )
 
         telemetry = ContextStrategyTelemetry(
             strategy=self.name,
             packet_id=packet_id,
-            source_item_count=len(raw_items) + len(summary_candidates),
+            source_item_count=len(raw_items) + len(summary_candidates) + len(authority_items),
             raw_item_count=raw_item_count,
-            summary_count=summary_count,
+            summary_count=len(summaries),
             estimated_input_chars=consumed,
             context_capacity=request.model_capabilities.context_tokens
             if request.model_capabilities

@@ -15,6 +15,10 @@ class BudgetType(Enum):
     ITEM_COUNT = auto()
 
 
+class ContextBudgetError(ValueError):
+    """Raised when required context items cannot fit in the configured budget."""
+
+
 UNKNOWN_CAPACITY_CHARACTERS = 8_000
 DEFAULT_TOKEN_TO_CHAR_RATIO = 4
 

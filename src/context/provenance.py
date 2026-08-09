@@ -56,6 +56,22 @@ class ProvenanceIndex:
             if ref.authority_level is not None
         )
 
+    def summary_sources(self) -> tuple[ProvenanceRef, ...]:
+        """Return all summary provenance references."""
+        return tuple(
+            ref
+            for ref in sorted(self._refs.values(), key=lambda r: (r.source_type, r.path or ""))
+            if ref.source_type == "summary"
+        )
+
+    def by_source_type(self, source_type: str) -> tuple[ProvenanceRef, ...]:
+        """Return all provenance references of the given source type."""
+        return tuple(
+            ref
+            for ref in sorted(self._refs.values(), key=lambda r: (r.source_type, r.path or ""))
+            if ref.source_type == source_type
+        )
+
     def validate_no_dangling(self, items: list[str]) -> list[str]:
         """Return item IDs that lack a registered provenance reference."""
         return sorted(item_id for item_id in items if item_id not in self._refs)

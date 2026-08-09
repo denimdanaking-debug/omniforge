@@ -52,13 +52,21 @@ def test_summary_provenance_preserved() -> None:
     strategy = HierarchicalContextStrategy()
     result = strategy.build(_request())
     assert result.packet.summary_count == 1
+    assert len(result.packet.summaries) == 1
+    summary = result.packet.summaries[0]
+    assert summary.text
+    assert summary.source_provenance_ids
+    # Source provenance IDs should reference actual source IDs, not summary-source-0.
+    assert all(not sid.startswith("summary-source-") for sid in summary.source_provenance_ids)
     assert any(ref.source_type == "summary" for ref in result.packet.provenance_index.values())
 
 
 def test_authority_kept_raw() -> None:
     strategy = HierarchicalContextStrategy()
     result = strategy.build(_request())
-    assert result.packet.authority == ("roadmap.md",)
+    assert len(result.packet.authority) == 1
+    assert result.packet.authority[0].content == "roadmap.md"
+    assert result.packet.authority[0].raw_included is True
     assert result.packet.authority_presence == AuthorityPresence.RAW_INCLUDED
 
 

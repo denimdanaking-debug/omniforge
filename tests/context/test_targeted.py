@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from src.context.budget import ContextBudget
 from src.context.schema import AuthorityPresence
 from src.context.strategy import ContextBuildRequest
@@ -15,6 +17,7 @@ def _request(
     budget_chars: int = 10_000,
     context_tokens: int = 4096,
     authority: tuple[str, ...] = ("roadmap.md",),
+    authority_entries: tuple[dict[str, Any], ...] = (),
     changed_files: tuple[str, ...] = ("src/a.py",),
     symbols: tuple[str, ...] = ("func_a",),
     tests: tuple[object, ...] = (),
@@ -26,7 +29,8 @@ def _request(
         role=ExecutionRole.CODING,
         risk=RiskLevel.R2_NORMAL,
         model_capabilities=ModelCapabilities(context_tokens=context_tokens),
-        authority_refs=authority,
+        authority_refs=authority if not authority_entries else (),
+        authority_entries=authority_entries,
         changed_files=changed_files,
         referenced_symbols=symbols,
         test_failures=tests,
@@ -67,6 +71,23 @@ def test_budget_protects_authority() -> None:
 
 def test_exclusions_recorded() -> None:
     strategy = TargetedContextStrategy()
-    result = strategy.build(_request(budget_chars=5))
+    # Use RAW_REFERENCED authority so the tiny budget does not raise ContextBudgetError.
+    result = strategy.build(
+        _request(
+            budget_chars=5,
+            authority=(),
+            authority_entries=(
+                {
+                    "authority_id": "auth-1",
+                    "provenance_id": "auth-prov-1",
+                    "full_source_ref": "roadmap.md",
+                    "revision": "a" * 40,
+                    "content_hash": "b" * 64,
+                    "content": "roadmap.md",
+                    "raw_included": True,
+                },
+            ),
+        )
+    )
     assert result.packet.exclusions
     assert result.telemetry.excluded_count == len(result.packet.exclusions)

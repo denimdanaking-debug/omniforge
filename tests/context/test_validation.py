@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from src.context.schema import (
+    AuthorityContextItem,
     AuthorityPresence,
     ContextPacket,
+    ContextSummary,
     ProvenanceRef,
     RelevantFile,
 )
 from src.context.validation import ContextPacketValidator, ValidationIssue
+
+_FAKE_COMMIT = "a" * 40
+_FAKE_HASH = "b" * 64
 
 
 def test_authority_protection() -> None:
@@ -21,10 +26,37 @@ def test_authority_protection() -> None:
 
 
 def test_summary_claiming_authority_rejected() -> None:
+    summary = ContextSummary(
+        text="summary of roadmap",
+        source_provenance_ids=("s1",),
+        source_hashes=(_FAKE_HASH,),
+        level="section",
+    )
     packet = ContextPacket(
+        authority=(
+            AuthorityContextItem(
+                authority_id="auth-1",
+                provenance_id="auth-prov-1",
+                full_source_ref="summary of roadmap",
+                revision=_FAKE_COMMIT,
+                content_hash=_FAKE_HASH,
+                content="summary of roadmap",
+                raw_included=True,
+            ),
+        ),
+        summaries=(summary,),
         summary_count=1,
-        authority=("summary of roadmap",),
-        provenance_index={"s1": ProvenanceRef("summary", path="summary")},
+        provenance_index={
+            "s1": ProvenanceRef("summary", path="summary", content_hash=_FAKE_HASH),
+            "auth-prov-1": ProvenanceRef(
+                "authority",
+                path="summary of roadmap",
+                revision=_FAKE_COMMIT,
+                content_hash=_FAKE_HASH,
+                authority_level="primary",
+            ),
+        },
+        authority_presence=AuthorityPresence.NOT_REQUIRED,
     )
     issues = ContextPacketValidator().validate(packet)
     assert any(issue.code == "SUMMARY_CLAIMS_AUTHORITY" for issue in issues)
@@ -41,10 +73,26 @@ def test_dangling_provenance_detected() -> None:
 def test_valid_packet_has_no_issues() -> None:
     packet = ContextPacket(
         packet_id="p1",
-        authority=("roadmap.md",),
+        authority=(
+            AuthorityContextItem(
+                authority_id="auth-1",
+                provenance_id="p1",
+                full_source_ref="roadmap.md",
+                revision=_FAKE_COMMIT,
+                content_hash=_FAKE_HASH,
+                content="roadmap.md",
+                raw_included=True,
+            ),
+        ),
         authority_presence=AuthorityPresence.RAW_INCLUDED,
         provenance_index={
-            "p1": ProvenanceRef("authority", path="roadmap.md", authority_level="primary")
+            "p1": ProvenanceRef(
+                "authority",
+                path="roadmap.md",
+                revision=_FAKE_COMMIT,
+                content_hash=_FAKE_HASH,
+                authority_level="primary",
+            )
         },
     )
     issues = ContextPacketValidator().validate(packet)

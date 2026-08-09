@@ -21,6 +21,20 @@ def normalize_path(path: str | Path) -> str:
     return normalized.rstrip("/")
 
 
+def item_provenance_id(item: Any) -> str | None:
+    """Return the provenance_id attribute/key of an item, if present."""
+    if isinstance(item, dict):
+        return item.get("provenance_id")
+    return getattr(item, "provenance_id", None)
+
+
+def item_content_hash(item: Any) -> str | None:
+    """Return the content_hash attribute/key of an item, if present."""
+    if isinstance(item, dict):
+        return item.get("content_hash")
+    return getattr(item, "content_hash", None)
+
+
 def deterministic_sort(
     items: Iterable[T],
     key: Callable[[T], Any] | None = None,

@@ -38,7 +38,9 @@ def _request(
 def test_raw_authority_preserved() -> None:
     strategy = HybridContextStrategy()
     result = strategy.build(_request())
-    assert result.packet.authority == ("roadmap.md",)
+    assert len(result.packet.authority) == 1
+    assert result.packet.authority[0].content == "roadmap.md"
+    assert result.packet.authority[0].raw_included is True
     assert result.packet.authority_presence == AuthorityPresence.RAW_INCLUDED
 
 
@@ -46,7 +48,12 @@ def test_lower_priority_summarized() -> None:
     strategy = HybridContextStrategy()
     result = strategy.build(_request())
     assert result.packet.summary_count == 1
-    assert result.packet.payload.get("summary") is not None
+    assert len(result.packet.summaries) == 1
+    summary = result.packet.summaries[0]
+    assert summary.text
+    assert summary.source_provenance_ids
+    # Source provenance IDs should reference actual source IDs, not summary-source-0.
+    assert all(not sid.startswith("summary-source-") for sid in summary.source_provenance_ids)
 
 
 def test_exclusions_recorded_under_budget_pressure() -> None:

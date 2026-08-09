@@ -7,6 +7,7 @@ from enum import Enum, auto
 from typing import Any
 
 from src.context._utils import deterministic_sort, hash_text
+from src.security.redaction import redact
 
 CONTEXT_PACKET_SCHEMA_VERSION = "1.0.0"
 
@@ -125,6 +126,148 @@ class ContextSummary:
             "source_revision": self.source_revision,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ContextSummary:
+        return cls(
+            text=data["text"],
+            source_provenance_ids=tuple(data.get("source_provenance_ids") or ()),
+            source_hashes=tuple(data.get("source_hashes") or ()),
+            level=data.get("level", ""),
+            lossy=bool(data.get("lossy", True)),
+            generated_by=data.get("generated_by", ""),
+            source_revision=data.get("source_revision"),
+        )
+
+
+@dataclass(frozen=True)
+class AuthorityContextItem:
+    """One authority item with immutable provenance metadata."""
+
+    authority_id: str
+    provenance_id: str
+    full_source_ref: str
+    revision: str
+    content_hash: str
+    content: str | None = None
+    raw_included: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "authority_id": self.authority_id,
+            "provenance_id": self.provenance_id,
+            "full_source_ref": self.full_source_ref,
+            "revision": self.revision,
+            "content_hash": self.content_hash,
+            "content": self.content,
+            "raw_included": self.raw_included,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AuthorityContextItem:
+        return cls(
+            authority_id=data["authority_id"],
+            provenance_id=data["provenance_id"],
+            full_source_ref=data["full_source_ref"],
+            revision=data["revision"],
+            content_hash=data["content_hash"],
+            content=data.get("content"),
+            raw_included=bool(data.get("raw_included", True)),
+        )
+
+
+@dataclass(frozen=True)
+class ReviewerPosition:
+    """One reviewer's stance on a disputed finding."""
+
+    reviewer_id: str
+    position: str
+    reasoning: str
+    evidence_refs: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "reviewer_id": self.reviewer_id,
+            "position": self.position,
+            "reasoning": self.reasoning,
+            "evidence_refs": list(self.evidence_refs),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ReviewerPosition:
+        return cls(
+            reviewer_id=data["reviewer_id"],
+            position=data["position"],
+            reasoning=data["reasoning"],
+            evidence_refs=tuple(data.get("evidence_refs") or ()),
+        )
+
+
+@dataclass(frozen=True)
+class DisputedFinding:
+    """A finding under arbitration with independent reviewer positions."""
+
+    finding_id: str
+    exact_text: str
+    positions: tuple[ReviewerPosition, ...]
+    evidence_refs: tuple[str, ...]
+    authority_refs: tuple[str, ...]
+    unresolved_question: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "finding_id": self.finding_id,
+            "exact_text": self.exact_text,
+            "positions": [p.to_dict() for p in self.positions],
+            "evidence_refs": list(self.evidence_refs),
+            "authority_refs": list(self.authority_refs),
+            "unresolved_question": self.unresolved_question,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DisputedFinding:
+        return cls(
+            finding_id=data["finding_id"],
+            exact_text=data["exact_text"],
+            positions=tuple(ReviewerPosition.from_dict(p) for p in data.get("positions") or ()),
+            evidence_refs=tuple(data.get("evidence_refs") or ()),
+            authority_refs=tuple(data.get("authority_refs") or ()),
+            unresolved_question=data.get("unresolved_question", ""),
+        )
+
+
+@dataclass(frozen=True)
+class ArbitrationContext:
+    """Arbitration evidence kept separate from authority."""
+
+    dispute_id: str
+    disputed_findings: tuple[DisputedFinding, ...]
+    reviewer_positions: tuple[ReviewerPosition, ...]
+    evidence_refs: tuple[str, ...]
+    authority_refs: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "dispute_id": self.dispute_id,
+            "disputed_findings": [f.to_dict() for f in self.disputed_findings],
+            "reviewer_positions": [p.to_dict() for p in self.reviewer_positions],
+            "evidence_refs": list(self.evidence_refs),
+            "authority_refs": list(self.authority_refs),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ArbitrationContext:
+        return cls(
+            dispute_id=data["dispute_id"],
+            disputed_findings=tuple(
+                DisputedFinding.from_dict(f) for f in data.get("disputed_findings") or ()
+            ),
+            reviewer_positions=tuple(
+                ReviewerPosition.from_dict(p) for p in data.get("reviewer_positions") or ()
+            ),
+            evidence_refs=tuple(data.get("evidence_refs") or ()),
+            authority_refs=tuple(data.get("authority_refs") or ()),
+        )
+
 
 @dataclass(frozen=True)
 class Exclusion:
@@ -147,7 +290,7 @@ class ContextPacket:
 
     schema_version: str = CONTEXT_PACKET_SCHEMA_VERSION
     packet_id: str = ""
-    authority: tuple[str, ...] = ()
+    authority: tuple[AuthorityContextItem, ...] = ()
     acceptance_criteria: tuple[AcceptanceCriterion, ...] = ()
     relevant_files: tuple[RelevantFile, ...] = ()
     current_diff: tuple[DiffInfo, ...] = ()
@@ -155,6 +298,8 @@ class ContextPacket:
     historical_findings: tuple[HistoricalFinding, ...] = ()
     task_metadata: TaskMetadata | None = None
     exclusions: tuple[Exclusion, ...] = ()
+    summaries: tuple[ContextSummary, ...] = ()
+    arbitration: ArbitrationContext | None = None
     provenance_index: dict[str, ProvenanceRef] = field(default_factory=dict)
     authority_presence: AuthorityPresence = AuthorityPresence.NOT_REQUIRED
     raw_item_count: int = 0
@@ -175,6 +320,11 @@ class ContextPacket:
             raise ValueError("raw_item_count must be non-negative")
         if self.summary_count < 0:
             raise ValueError("summary_count must be non-negative")
+        if len(self.summaries) != self.summary_count:
+            raise ValueError(
+                f"summary_count {self.summary_count} does not match len(summaries) "
+                f"{len(self.summaries)}"
+            )
         if self.estimated_input_chars < 0:
             raise ValueError("estimated_input_chars must be non-negative")
 
@@ -189,6 +339,14 @@ class ContextPacket:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a deterministic JSON-compatible dict."""
         return _packet_to_dict(self)
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        """Serialize with secret redaction for diagnostics and telemetry."""
+        return dict(redact(self.to_dict()))
+
+    def to_safe_json(self) -> str:
+        """Serialize to a redacted JSON string."""
+        return _json_dumps_sorted(self.to_safe_dict())
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ContextPacket:
@@ -228,7 +386,7 @@ def _packet_to_dict(packet: ContextPacket) -> dict[str, Any]:
     return {
         "schema_version": packet.schema_version,
         "packet_id": packet.packet_id,
-        "authority": list(packet.authority),
+        "authority": [item.to_dict() for item in packet.authority],
         "acceptance_criteria": _dicts(packet.acceptance_criteria),
         "relevant_files": _dicts(packet.relevant_files),
         "current_diff": _dicts(packet.current_diff),
@@ -236,6 +394,8 @@ def _packet_to_dict(packet: ContextPacket) -> dict[str, Any]:
         "historical_findings": _dicts(packet.historical_findings),
         "task_metadata": asdict(packet.task_metadata) if packet.task_metadata else None,
         "exclusions": _dicts(packet.exclusions),
+        "summaries": [s.to_dict() for s in packet.summaries],
+        "arbitration": packet.arbitration.to_dict() if packet.arbitration else None,
         "provenance_index": provenance_index,
         "authority_presence": packet.authority_presence.name,
         "raw_item_count": packet.raw_item_count,
@@ -331,6 +491,31 @@ def _packet_from_dict(data: dict[str, Any]) -> ContextPacket:
             estimated_chars=raw.get("estimated_chars", 0),
         )
 
+    def _authority(raw: dict[str, Any]) -> AuthorityContextItem:
+        return AuthorityContextItem.from_dict(raw)
+
+    authority_data = data.get("authority") or ()
+    authority: tuple[AuthorityContextItem, ...]
+    if authority_data and isinstance(authority_data[0], str):
+        # Backward compatibility for legacy string-only authority tuples.
+        authority = tuple(
+            AuthorityContextItem(
+                authority_id=f"legacy-{i}",
+                provenance_id="",
+                full_source_ref=text,
+                revision="",
+                content_hash="",
+                content=text,
+                raw_included=True,
+            )
+            for i, text in enumerate(authority_data)
+        )
+    else:
+        authority = tuple(_authority(item) for item in authority_data)
+
+    arbitration_raw = data.get("arbitration")
+    arbitration = ArbitrationContext.from_dict(arbitration_raw) if arbitration_raw else None
+
     authority_presence_value = data.get("authority_presence", AuthorityPresence.NOT_REQUIRED.name)
     try:
         authority_presence = AuthorityPresence[authority_presence_value]
@@ -340,7 +525,7 @@ def _packet_from_dict(data: dict[str, Any]) -> ContextPacket:
     return ContextPacket(
         schema_version=data.get("schema_version", CONTEXT_PACKET_SCHEMA_VERSION),
         packet_id=data.get("packet_id", ""),
-        authority=tuple(data.get("authority") or ()),
+        authority=authority,
         acceptance_criteria=tuple(_criterion(item) for item in _items(data, "acceptance_criteria")),
         relevant_files=tuple(_file(item) for item in _items(data, "relevant_files")),
         current_diff=tuple(_diff(item) for item in _items(data, "current_diff")),
@@ -348,6 +533,8 @@ def _packet_from_dict(data: dict[str, Any]) -> ContextPacket:
         historical_findings=tuple(_finding(item) for item in _items(data, "historical_findings")),
         task_metadata=_task(data.get("task_metadata")),
         exclusions=tuple(_exclusion(item) for item in _items(data, "exclusions")),
+        summaries=tuple(ContextSummary.from_dict(s) for s in data.get("summaries") or ()),
+        arbitration=arbitration,
         provenance_index=provenance_index,
         authority_presence=authority_presence,
         raw_item_count=data.get("raw_item_count", 0),

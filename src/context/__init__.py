@@ -13,6 +13,7 @@ from src.context.budget import (
     BudgetResult,
     BudgetType,
     ContextBudget,
+    ContextBudgetError,
     compute_usable_budget,
     estimate_tokens,
 )
@@ -29,6 +30,8 @@ from src.context.provenance import ProvenanceIndex
 from src.context.schema import (
     CONTEXT_PACKET_SCHEMA_VERSION,
     AcceptanceCriterion,
+    ArbitrationContext,
+    AuthorityContextItem,
     AuthorityPresence,
     ContextPacket,
     ContextSummary,
@@ -52,11 +55,14 @@ from src.context.validation import ContextPacketValidator, ValidationIssue
 __all__ = [
     "CONTEXT_PACKET_SCHEMA_VERSION",
     "AcceptanceCriterion",
+    "ArbitrationContext",
     "ArbitrationEvidencePacket",
+    "AuthorityContextItem",
     "AuthorityPresence",
     "BudgetResult",
     "BudgetType",
     "ContextBudget",
+    "ContextBudgetError",
     "ContextBuildRequest",
     "ContextOutcomeRecord",
     "ContextPacket",

@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from src.context._utils import deterministic_sort, normalize_path
-from src.context.budget import compute_usable_budget
+from src.context.budget import ContextBudgetError, compute_usable_budget
 from src.context.provenance import ProvenanceIndex
 from src.context.schema import (
+    AuthorityContextItem,
     AuthorityPresence,
     ContextPacket,
     Exclusion,
@@ -17,9 +18,73 @@ from src.context.schema import (
     TaskMetadata,
     TestEvidence,
 )
-from src.context.strategy import ContextBuildRequest, ContextStrategy, ContextStrategyResult
+from src.context.strategy import (
+    ContextBuildRequest,
+    ContextStrategy,
+    ContextStrategyResult,
+    _authority_items_from_request,
+)
 from src.context.targeted import _provenance_coverage
 from src.context.telemetry import ContextStrategyTelemetry
+
+
+def _allocate_authority_items(
+    authority_items: tuple[AuthorityContextItem, ...],
+    usable_chars: int,
+    max_items: int | None,
+    consumed: int,
+    item_count: int,
+) -> tuple[list[AuthorityContextItem], int, int, int]:
+    """Allocate authority items first, falling back to RAW_REFERENCED when needed."""
+    authority: list[AuthorityContextItem] = []
+    raw_count = 0
+    for item in authority_items:
+        if item.raw_included:
+            chars = len(item.content) if item.content else 0
+            fits = (max_items is None or item_count + 1 <= max_items) and (
+                consumed + chars <= usable_chars
+            )
+            if fits:
+                authority.append(item)
+                consumed += chars
+                item_count += 1
+                raw_count += 1
+            else:
+                if item.revision and item.content_hash:
+                    authority.append(
+                        AuthorityContextItem(
+                            authority_id=item.authority_id,
+                            provenance_id=item.provenance_id,
+                            full_source_ref=item.full_source_ref,
+                            revision=item.revision,
+                            content_hash=item.content_hash,
+                            content=None,
+                            raw_included=False,
+                        )
+                    )
+                else:
+                    raise ContextBudgetError(
+                        f"Authority item {item.authority_id!r} cannot fit in budget and lacks "
+                        "revision/content_hash for reference"
+                    )
+        else:
+            if not item.revision or not item.content_hash:
+                raise ValueError(
+                    f"Authority item {item.authority_id!r} marked raw_included=False but missing "
+                    "revision or content_hash"
+                )
+            authority.append(
+                AuthorityContextItem(
+                    authority_id=item.authority_id,
+                    provenance_id=item.provenance_id,
+                    full_source_ref=item.full_source_ref,
+                    revision=item.revision,
+                    content_hash=item.content_hash,
+                    content=None,
+                    raw_included=False,
+                )
+            )
+    return authority, consumed, item_count, raw_count
 
 
 class LargeContextStrategy(ContextStrategy):
@@ -39,17 +104,28 @@ class LargeContextStrategy(ContextStrategy):
         max_items = request.budget.max_items
 
         provenance_index = ProvenanceIndex()
-        items: list[tuple[Any, int, str, str]] = []  # (item, chars, source_id, category)
 
         # Authority first.
-        for idx, ref in enumerate(deterministic_sort(request.authority_refs, key=str)):
-            source_id = f"authority-{idx}"
-            text = str(ref)
+        authority_items = _authority_items_from_request(request)
+        for item in authority_items:
             provenance_index.register(
-                source_id,
-                ProvenanceRef(source_type="authority", path=text, authority_level="roadmap"),
+                item.provenance_id,
+                ProvenanceRef(
+                    source_type="authority",
+                    path=item.full_source_ref,
+                    authority_level="roadmap",
+                    revision=item.revision or None,
+                    content_hash=item.content_hash or None,
+                ),
             )
-            items.append((text, len(text), source_id, "authority"))
+
+        consumed = 0
+        item_count = 0
+        authority, consumed, item_count, raw_authority_count = _allocate_authority_items(
+            authority_items, usable_chars, max_items, consumed, item_count
+        )
+
+        items: list[tuple[Any, int, str, str]] = []  # (item, chars, source_id, category)
 
         # Include raw content for all changed files (large-context assumption).
         for idx, path in enumerate(deterministic_sort(request.changed_files)):
@@ -121,13 +197,10 @@ class LargeContextStrategy(ContextStrategy):
             provenance_index.register(path_id, ProvenanceRef(source_type="filesystem", path=norm))
             items.append((file_item, len(norm) + 20, path_id, "file"))
 
-        authority: list[str] = []
         relevant_files: list[RelevantFile] = []
         test_evidence: list[TestEvidence] = []
         historical_findings: list[HistoricalFinding] = []
         exclusions: list[Exclusion] = []
-        consumed = 0
-        item_count = 0
         truncation_events: list[str] = []
 
         for item, chars, source_id, category in items:
@@ -156,18 +229,21 @@ class LargeContextStrategy(ContextStrategy):
 
             consumed += chars
             item_count += 1
-            if category == "authority":
-                authority.append(str(item))
-            elif category == "file":
+            if category == "file":
                 relevant_files.append(item)
             elif category == "test":
                 test_evidence.append(item)
             elif category == "finding":
                 historical_findings.append(item)
 
-        authority_presence = (
-            AuthorityPresence.RAW_INCLUDED if authority else AuthorityPresence.NOT_REQUIRED
-        )
+        if authority_items:
+            authority_presence = (
+                AuthorityPresence.RAW_INCLUDED
+                if raw_authority_count > 0
+                else AuthorityPresence.RAW_REFERENCED
+            )
+        else:
+            authority_presence = AuthorityPresence.NOT_REQUIRED
 
         task_metadata = TaskMetadata(
             task_id=request.task_id,
@@ -176,9 +252,16 @@ class LargeContextStrategy(ContextStrategy):
             requested_objective=request.requested_objective,
             constraints=request.constraints,
         )
+        provenance_index.register(
+            task_metadata.task_id,
+            ProvenanceRef(source_type="task_metadata", path=task_metadata.task_id),
+        )
 
         raw_item_count = (
-            len(authority) + len(relevant_files) + len(test_evidence) + len(historical_findings)
+            raw_authority_count
+            + len(relevant_files)
+            + len(test_evidence)
+            + len(historical_findings)
         )
 
         packet = ContextPacket(
@@ -204,7 +287,7 @@ class LargeContextStrategy(ContextStrategy):
         telemetry = ContextStrategyTelemetry(
             strategy=self.name,
             packet_id=packet_id,
-            source_item_count=len(items),
+            source_item_count=len(items) + len(authority_items),
             raw_item_count=raw_item_count,
             summary_count=0,
             estimated_input_chars=consumed,

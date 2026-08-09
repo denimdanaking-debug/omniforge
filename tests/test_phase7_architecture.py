@@ -8,14 +8,17 @@ from pathlib import Path
 
 import pytest
 
+from src.context._utils import hash_text
 from src.context.budget import ContextBudget
 from src.context.hybrid import HybridContextStrategy
-from src.context.schema import AuthorityPresence, ContextPacket
+from src.context.schema import AuthorityContextItem, AuthorityPresence, ContextPacket
 from src.context.strategy import ContextBuildRequest
 from src.policy.risk import RiskLevel
 from src.routing.capabilities import ModelCapabilities
 from src.routing.roles import ExecutionRole
 from src.security.redaction import contains_secret, redact
+
+_FAKE_COMMIT = "a" * 40
 
 ROOT = Path(__file__).resolve().parents[1]
 SENTINEL = "OMNIFORGE_TEST_SECRET_SENTINEL_PHASE7_ARCH_999"
@@ -79,17 +82,29 @@ def test_summary_does_not_replace_required_authority() -> None:
     )
     result = strategy.build(request)
     assert result.packet.authority_presence == AuthorityPresence.RAW_INCLUDED
-    assert result.packet.authority == ("roadmap.md",)
+    assert len(result.packet.authority) == 1
+    assert result.packet.authority[0].content == "roadmap.md"
+    assert result.packet.authority[0].raw_included is True
     assert result.packet.summary_count > 0
     for item in result.packet.authority:
-        assert "summary" not in item.lower()
+        assert "summary" not in (item.content or "").lower()
 
 
 @pytest.mark.architecture
 def test_context_packet_has_deterministic_content_hash() -> None:
     packet = ContextPacket(
         packet_id="p",
-        authority=("a",),
+        authority=(
+            AuthorityContextItem(
+                authority_id="auth-a",
+                provenance_id="p1",
+                full_source_ref="a",
+                revision=_FAKE_COMMIT,
+                content_hash=hash_text("a"),
+                content="a",
+                raw_included=True,
+            ),
+        ),
         provenance_index={
             "p1": __import__("src.context.schema", fromlist=["ProvenanceRef"]).ProvenanceRef(
                 "git", path="a.py"
@@ -121,7 +136,17 @@ def test_no_live_calls_in_context_tests() -> None:
 def test_redaction_sentinel_not_in_context_payload() -> None:
     packet = ContextPacket(
         packet_id="p",
-        authority=(f"error bearer {SENTINEL}",),
+        authority=(
+            AuthorityContextItem(
+                authority_id="auth-sentinel",
+                provenance_id="p1",
+                full_source_ref=f"error bearer {SENTINEL}",
+                revision=_FAKE_COMMIT,
+                content_hash=hash_text(SENTINEL),
+                content=f"error bearer {SENTINEL}",
+                raw_included=True,
+            ),
+        ),
     )
     data = packet.to_dict()
     safe_data = redact(data)
