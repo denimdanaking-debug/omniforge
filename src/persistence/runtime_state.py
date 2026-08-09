@@ -11,6 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from src.providers.identity import ProviderHealth
+from src.recovery.clock import parse_iso
+from src.routing.roles import ExecutionRole
 from src.security.redaction import redact
 from src.security.secrets import SecretValue
 
@@ -208,6 +211,27 @@ def _validate_project_policies(value: Any) -> None:
         )
 
 
+def _validate_recovery_timestamp(path: str, value: Any) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str):
+        raise CorruptRuntimeState(
+            RuntimeStateDiagnostic("INVALID_RECOVERY_TIMESTAMP", f"{path} must be a string or null")
+        )
+    try:
+        parsed = parse_iso(value)
+    except ValueError as exc:
+        raise CorruptRuntimeState(
+            RuntimeStateDiagnostic(
+                "INVALID_RECOVERY_TIMESTAMP", f"{path} is not a valid aware ISO timestamp: {exc}"
+            )
+        ) from exc
+    if parsed.tzinfo is None:
+        raise CorruptRuntimeState(
+            RuntimeStateDiagnostic("INVALID_RECOVERY_TIMESTAMP", f"{path} must be timezone-aware")
+        )
+
+
 def _validate_recovery_state_map(path: str, value: Any) -> None:
     if not isinstance(value, dict):
         raise CorruptRuntimeState(
@@ -231,6 +255,15 @@ def _validate_recovery_state_map(path: str, value: Any) -> None:
                     "INVALID_RECOVERY_HEALTH", f"{path}.{key}.health must be a string"
                 )
             )
+        try:
+            ProviderHealth(health)
+        except ValueError as exc:
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_RECOVERY_HEALTH",
+                    f"{path}.{key}.health has unknown value {health!r}",
+                )
+            ) from exc
         consecutive = entry.get("consecutive_failures", 0)
         if not isinstance(consecutive, int) or consecutive < 0:
             raise CorruptRuntimeState(
@@ -246,14 +279,15 @@ def _validate_recovery_state_map(path: str, value: Any) -> None:
             "next_recheck_at",
             "quota_reset_at",
         ):
-            field_value = entry.get(field_name)
-            if field_value is not None and not isinstance(field_value, str):
-                raise CorruptRuntimeState(
-                    RuntimeStateDiagnostic(
-                        "INVALID_RECOVERY_TIMESTAMP",
-                        f"{path}.{key}.{field_name} must be a string or null",
-                    )
+            _validate_recovery_timestamp(f"{path}.{key}.{field_name}", entry.get(field_name))
+        # Structural consistency: disabled routes should not be scheduled for retry.
+        if health == ProviderHealth.DISABLED.value and entry.get("next_recheck_at") is not None:
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INCONSISTENT_RECOVERY_STATE",
+                    f"{path}.{key} is DISABLED but has next_recheck_at",
                 )
+            )
 
 
 def _validate_failure_domain_index(value: Any) -> None:
@@ -297,13 +331,7 @@ def _validate_scheduler(value: Any) -> None:
                     "INVALID_SCHEDULER_ROUTE_ID", "scheduler keys must be non-empty strings"
                 )
             )
-        if not isinstance(due_at, str):
-            raise CorruptRuntimeState(
-                RuntimeStateDiagnostic(
-                    "INVALID_SCHEDULER_TIME",
-                    f"scheduler {route_id!r} must map to an ISO timestamp string",
-                )
-            )
+        _validate_recovery_timestamp(f"recovery_scheduler.{route_id}", due_at)
 
 
 def _validate_waiting_tasks(value: Any) -> None:
@@ -332,6 +360,73 @@ def _validate_waiting_tasks(value: Any) -> None:
                         f"waiting_tasks.{task_id} missing {required}",
                     )
                 )
+        stored_task_id = task.get("task_id")
+        if not isinstance(stored_task_id, str) or not stored_task_id:
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_WAITING_TASK_ID",
+                    f"waiting_tasks.{task_id}.task_id must be a non-empty string",
+                )
+            )
+        if stored_task_id != task_id:
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "MISMATCHED_WAITING_TASK_ID",
+                    f"waiting_tasks key {task_id!r} does not match task_id {stored_task_id!r}",
+                )
+            )
+        role = task.get("role")
+        if not isinstance(role, str):
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_WAITING_TASK_ROLE", f"waiting_tasks.{task_id}.role must be a string"
+                )
+            )
+        try:
+            ExecutionRole(role)
+        except ValueError as exc:
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_WAITING_TASK_ROLE",
+                    f"waiting_tasks.{task_id}.role has unknown value {role!r}",
+                )
+            ) from exc
+        reason = task.get("reason")
+        if not isinstance(reason, str) or not reason:
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_WAITING_TASK_REASON",
+                    f"waiting_tasks.{task_id}.reason must be a non-empty string",
+                )
+            )
+        _validate_recovery_timestamp(
+            f"waiting_tasks.{task_id}.next_recheck_at", task.get("next_recheck_at")
+        )
+        affected = task.get("affected_failure_domains")
+        if affected is not None:
+            if not isinstance(affected, list):
+                raise CorruptRuntimeState(
+                    RuntimeStateDiagnostic(
+                        "INVALID_WAITING_TASK_DOMAINS",
+                        f"waiting_tasks.{task_id}.affected_failure_domains must be a list",
+                    )
+                )
+            for domain in affected:
+                if not isinstance(domain, str) or not domain:
+                    raise CorruptRuntimeState(
+                        RuntimeStateDiagnostic(
+                            "INVALID_WAITING_TASK_DOMAIN",
+                            f"waiting_tasks.{task_id}.affected_failure_domains entries must be non-empty strings",
+                        )
+                    )
+        attempted = task.get("attempted_candidates")
+        if attempted is not None and not isinstance(attempted, list):
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_WAITING_TASK_CANDIDATES",
+                    f"waiting_tasks.{task_id}.attempted_candidates must be a list",
+                )
+            )
 
 
 def validate_runtime_state(state: Mapping[str, Any]) -> dict[str, Any]:

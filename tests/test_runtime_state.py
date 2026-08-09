@@ -183,6 +183,108 @@ class RuntimeStateVersioningTests(unittest.TestCase):
             runtime_state.validate_runtime_state(state)
         self.assertEqual("UNKNOWN_PIN_FIELD", caught.exception.diagnostic.code)
 
+    def test_recovery_state_rejects_unknown_health(self) -> None:
+        state = self.valid_state()
+        state["route_recovery_state"] = {
+            "openai-direct": {"health": "banana", "consecutive_failures": 0}
+        }
+        with self.assertRaises(runtime_state.CorruptRuntimeState) as caught:
+            runtime_state.validate_runtime_state(state)
+        self.assertEqual("INVALID_RECOVERY_HEALTH", caught.exception.diagnostic.code)
+
+    def test_recovery_state_accepts_all_canonical_healths(self) -> None:
+        from src.providers.identity import ProviderHealth
+
+        for health in ProviderHealth:
+            state = self.valid_state()
+            state["route_recovery_state"] = {
+                "route-1": {"health": health.value, "consecutive_failures": 0}
+            }
+            result = runtime_state.validate_runtime_state(state)
+            self.assertEqual(health.value, result["route_recovery_state"]["route-1"]["health"])
+
+    def test_recovery_state_rejects_naive_timestamp(self) -> None:
+        state = self.valid_state()
+        state["provider_recovery_state"] = {
+            "openai": {
+                "health": "healthy",
+                "consecutive_failures": 0,
+                "next_recheck_at": "2026-01-01T12:00:00",
+            }
+        }
+        with self.assertRaises(runtime_state.CorruptRuntimeState) as caught:
+            runtime_state.validate_runtime_state(state)
+        self.assertEqual("INVALID_RECOVERY_TIMESTAMP", caught.exception.diagnostic.code)
+
+    def test_recovery_state_rejects_disabled_with_next_recheck(self) -> None:
+        state = self.valid_state()
+        state["route_recovery_state"] = {
+            "route-1": {
+                "health": "disabled",
+                "consecutive_failures": 0,
+                "next_recheck_at": "2026-01-01T12:00:00+00:00",
+            }
+        }
+        with self.assertRaises(runtime_state.CorruptRuntimeState) as caught:
+            runtime_state.validate_runtime_state(state)
+        self.assertEqual("INCONSISTENT_RECOVERY_STATE", caught.exception.diagnostic.code)
+
+    def test_scheduler_rejects_naive_timestamp(self) -> None:
+        state = self.valid_state()
+        state["recovery_scheduler"] = {"route-1": "2026-01-01T12:00:00"}
+        with self.assertRaises(runtime_state.CorruptRuntimeState) as caught:
+            runtime_state.validate_runtime_state(state)
+        self.assertEqual("INVALID_RECOVERY_TIMESTAMP", caught.exception.diagnostic.code)
+
+    def test_scheduler_rejects_malformed_timestamp(self) -> None:
+        state = self.valid_state()
+        state["recovery_scheduler"] = {"route-1": "tomorrow sometime"}
+        with self.assertRaises(runtime_state.CorruptRuntimeState) as caught:
+            runtime_state.validate_runtime_state(state)
+        self.assertEqual("INVALID_RECOVERY_TIMESTAMP", caught.exception.diagnostic.code)
+
+    def test_waiting_task_rejects_invalid_role(self) -> None:
+        state = self.valid_state()
+        state["waiting_tasks"] = {
+            "task-1": {
+                "task_id": "task-1",
+                "role": "wizard",
+                "reason": "outage",
+                "next_recheck_at": "2026-01-01T12:00:00+00:00",
+            }
+        }
+        with self.assertRaises(runtime_state.CorruptRuntimeState) as caught:
+            runtime_state.validate_runtime_state(state)
+        self.assertEqual("INVALID_WAITING_TASK_ROLE", caught.exception.diagnostic.code)
+
+    def test_waiting_task_rejects_mismatched_id(self) -> None:
+        state = self.valid_state()
+        state["waiting_tasks"] = {
+            "task-1": {
+                "task_id": "task-2",
+                "role": "coding",
+                "reason": "outage",
+                "next_recheck_at": "2026-01-01T12:00:00+00:00",
+            }
+        }
+        with self.assertRaises(runtime_state.CorruptRuntimeState) as caught:
+            runtime_state.validate_runtime_state(state)
+        self.assertEqual("MISMATCHED_WAITING_TASK_ID", caught.exception.diagnostic.code)
+
+    def test_waiting_task_rejects_naive_timestamp(self) -> None:
+        state = self.valid_state()
+        state["waiting_tasks"] = {
+            "task-1": {
+                "task_id": "task-1",
+                "role": "coding",
+                "reason": "outage",
+                "next_recheck_at": "2026-01-01T12:00:00",
+            }
+        }
+        with self.assertRaises(runtime_state.CorruptRuntimeState) as caught:
+            runtime_state.validate_runtime_state(state)
+        self.assertEqual("INVALID_RECOVERY_TIMESTAMP", caught.exception.diagnostic.code)
+
 
 if __name__ == "__main__":
     unittest.main()

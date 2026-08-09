@@ -112,14 +112,18 @@ def test_recovered_provider_becomes_eligible_not_preferred() -> None:
             provider_id="b",
             model_id="recovered-model",
             route_id="recovered",
-            capabilities=ModelCapabilities(context_tokens=1000),
+            capabilities=ModelCapabilities(
+                context_tokens=1000, supported_roles=frozenset({ExecutionRole.CODING.value})
+            ),
             recovery_state=RouteRecoveryState(health=ProviderHealth.HEALTHY),
         ),
         SurvivalCandidate(
             provider_id="a",
             model_id="steady-model",
             route_id="steady",
-            capabilities=ModelCapabilities(context_tokens=1000),
+            capabilities=ModelCapabilities(
+                context_tokens=1000, supported_roles=frozenset({ExecutionRole.CODING.value})
+            ),
             recovery_state=RouteRecoveryState(health=ProviderHealth.HEALTHY),
         ),
     ]
@@ -191,6 +195,36 @@ def test_failure_domain_propagation_does_not_mutate_model_reputation() -> None:
     index.mark_domain_affected("openrouter", sm, states, "openrouter outage")
 
     assert registry.get("claude-x").reputation == before
+
+
+@pytest.mark.architecture
+def test_known_quota_does_not_degrade_provider_health() -> None:
+    """Quota telemetry is capacity information, not provider health degradation."""
+    clock = FixedClock()
+    sm = HealthStateMachine(clock)
+    state = RouteRecoveryState(health=ProviderHealth.HEALTHY)
+    quota = ProviderQuotaState(remaining_fraction=0.4, provider_signal=QuotaSignal.AVAILABLE)
+    signal = signal_from_quota(
+        quota, provider_id="openai", route_id="openai-direct", failure_domain="openai", clock=clock
+    )
+    new_state = sm.apply(state, signal)
+    assert new_state.health is ProviderHealth.HEALTHY
+
+
+@pytest.mark.architecture
+def test_quota_pressure_used_by_balancer_not_health_machine() -> None:
+    """Quota pressure informs load balancing while provider health stays separate."""
+    from src.recovery.quota_balance import QuotaBalancer, QuotaCandidate, QuotaPressure
+
+    balancer = QuotaBalancer()
+    candidates = [
+        QuotaCandidate("a", "r1", ProviderQuotaState(remaining_fraction=0.1)),
+        QuotaCandidate("b", "r2", ProviderQuotaState(remaining_fraction=0.8)),
+    ]
+    ordered = balancer.select(candidates)
+    assert QuotaPressure.from_quota(candidates[0].quota) is QuotaPressure.CRITICAL
+    assert QuotaPressure.from_quota(candidates[1].quota) is QuotaPressure.LOW
+    assert ordered[0].provider_id == "b"
 
 
 @pytest.mark.architecture

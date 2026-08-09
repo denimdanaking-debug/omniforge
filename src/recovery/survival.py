@@ -12,7 +12,7 @@ from src.recovery.quota_balance import QuotaBalancer, QuotaCandidate
 from src.recovery.reserve import ReserveCapacityPolicy, evaluate_reserve_eligibility
 from src.recovery.state_machine import RouteRecoveryState
 from src.recovery.telemetry import RecoveryEventType, RecoveryTelemetryBuffer
-from src.routing.capabilities import ModelCapabilities
+from src.routing.capabilities import CapabilityRequirement, ModelCapabilities, match_capabilities
 from src.routing.roles import ExecutionRole
 
 
@@ -69,16 +69,30 @@ class OutageSurvivalEngine:
         *,
         role: ExecutionRole,
         candidates: list[SurvivalCandidate],
+        requirement: CapabilityRequirement | None = None,
         reserve_policy: ReserveCapacityPolicy | None = None,
         quota_domain_states: dict[str, ProviderQuotaState] | None = None,
     ) -> DispatchDecision:
-        """Return dispatch choice or a persisted wait reason."""
-        now = self.clock.now()
+        """Return dispatch choice or a persisted wait reason.
 
-        eligible = self._filter_eligible(candidates)
-        if not eligible:
+        A candidate must be operationally eligible AND satisfy the hard role/
+        capability requirement. Incapable candidates are never dispatched.
+        """
+        now = self.clock.now()
+        effective_requirement = self._effective_requirement(role, requirement)
+
+        operationally_eligible = self._filter_operationally_eligible(candidates)
+        if not operationally_eligible:
             return self._wait(
                 "no_eligible_routes",
+                candidates,
+                now,
+            )
+
+        eligible = self._filter_capable(operationally_eligible, effective_requirement)
+        if not eligible:
+            return self._wait(
+                "no_capability_eligible_routes",
                 candidates,
                 now,
             )
@@ -135,8 +149,37 @@ class OutageSurvivalEngine:
             ),
         )
 
-    def _filter_eligible(self, candidates: list[SurvivalCandidate]) -> list[SurvivalCandidate]:
+    def _effective_requirement(
+        self,
+        role: ExecutionRole,
+        requirement: CapabilityRequirement | None,
+    ) -> CapabilityRequirement:
+        role_roles = frozenset({role.value})
+        if requirement is None:
+            return CapabilityRequirement(required_roles=role_roles)
+        return CapabilityRequirement(
+            min_context_tokens=requirement.min_context_tokens,
+            structured_output=requirement.structured_output,
+            tool_use=requirement.tool_use,
+            streaming=requirement.streaming,
+            reasoning=requirement.reasoning,
+            code_generation=requirement.code_generation,
+            multimodal=requirement.multimodal,
+            allowed_deployment_modes=requirement.allowed_deployment_modes,
+            required_roles=requirement.required_roles | role_roles,
+        )
+
+    def _filter_operationally_eligible(
+        self, candidates: list[SurvivalCandidate]
+    ) -> list[SurvivalCandidate]:
         return [c for c in candidates if c.recovery_state.is_eligible()]
+
+    def _filter_capable(
+        self,
+        candidates: list[SurvivalCandidate],
+        requirement: CapabilityRequirement,
+    ) -> list[SurvivalCandidate]:
+        return [c for c in candidates if match_capabilities(c.capabilities, requirement).eligible]
 
     def _apply_reserve_policy(
         self,

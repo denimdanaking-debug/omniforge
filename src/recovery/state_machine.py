@@ -33,9 +33,15 @@ class HealthTransition:
 
 @dataclass(frozen=True)
 class RouteRecoveryState:
-    """Immutable recovery state for one provider/route."""
+    """Immutable recovery state for one provider/route.
 
-    health: ProviderHealth = ProviderHealth.HEALTHY
+    An unobserved route starts as ``DEGRADED``: usable only as a conservative
+    fallback until positive success or health-check evidence transitions it to
+    ``HEALTHY``. No adapter object or persisted record is assumed healthy by
+    default.
+    """
+
+    health: ProviderHealth = ProviderHealth.DEGRADED
     consecutive_failures: int = 0
     last_success_at: datetime.datetime | None = None
     last_failure_at: datetime.datetime | None = None
@@ -43,7 +49,7 @@ class RouteRecoveryState:
     next_recheck_at: datetime.datetime | None = None
     quota_reset_at: datetime.datetime | None = None
     failure_domain: str = ""
-    reason: str | None = None
+    reason: str | None = "unobserved"
     transition_log: tuple[HealthTransition, ...] = ()
 
     def __post_init__(self) -> None:
@@ -90,6 +96,10 @@ class RouteRecoveryState:
                     "reason": t.reason,
                     "retry_after": isoformat(t.retry_after) if t.retry_after else None,
                     "reset_at": isoformat(t.reset_at) if t.reset_at else None,
+                    "source_provider_id": t.source_signal.provider_id,
+                    "source_route_id": t.source_signal.route_id,
+                    "source_failure_domain": t.source_signal.failure_domain,
+                    "source_kind": t.source_signal.kind.value,
                 }
                 for t in self.transition_log
             ],
@@ -101,6 +111,16 @@ class RouteRecoveryState:
             value = data.get(name)
             return parse_iso(value) if value else None
 
+        def _source_signal(t: dict[str, Any], observed_at: datetime.datetime) -> ProviderSignal:
+            kind_value = t.get("source_kind", SignalKind.ERROR.value)
+            return ProviderSignal(
+                provider_id=t.get("source_provider_id") or "unknown",
+                route_id=t.get("source_route_id"),
+                failure_domain=t.get("source_failure_domain") or "unknown",
+                timestamp=observed_at,
+                kind=SignalKind(kind_value),
+            )
+
         log = data.get("transition_log") or []
         transitions = tuple(
             HealthTransition(
@@ -108,13 +128,7 @@ class RouteRecoveryState:
                 new=ProviderHealth(t["new"]),
                 observed_at=parse_iso(t["observed_at"]),
                 reason=t["reason"],
-                source_signal=ProviderSignal(
-                    provider_id="unknown",
-                    route_id=None,
-                    failure_domain="unknown",
-                    timestamp=parse_iso(t["observed_at"]),
-                    kind=SignalKind.ERROR,
-                ),
+                source_signal=_source_signal(t, parse_iso(t["observed_at"])),
                 retry_after=_parse_from_value(t.get("retry_after")),
                 reset_at=_parse_from_value(t.get("reset_at")),
             )
@@ -371,15 +385,17 @@ class HealthStateMachine:
                 reset_at=reset_at,
             )
 
-        # Known quota with pressure: degrade, but do not treat as outage.
-        if quota.is_known():
+        # Non-exhausted quota is capacity telemetry, not provider health degradation.
+        # If the route was previously quota-exhausted, this verified non-exhausted
+        # report is evidence of recovery.
+        if state.health is ProviderHealth.QUOTA_EXHAUSTED:
             return self._transition_to(
                 state,
-                ProviderHealth.DEGRADED,
+                ProviderHealth.HEALTHY,
                 signal,
-                reason=f"quota pressure: {quota.provider_signal.value}",
-                next_recheck_at=now
-                + datetime.timedelta(seconds=self._config.recheck_policy.degraded_recheck_seconds),
+                reason="quota_recovered",
+                last_success_at=now,
+                reset_failures=True,
             )
 
         return state

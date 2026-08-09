@@ -231,6 +231,23 @@ class TestBackoff:
 
 
 class TestHealthStateMachine:
+    def test_unobserved_state_defaults_degraded(self) -> None:
+        state = RouteRecoveryState()
+        assert state.health is ProviderHealth.DEGRADED
+        assert state.reason == "unobserved"
+        assert state.is_eligible()
+
+    def test_healthy_requires_success_evidence(
+        self, clock: FixedClock, fast_config: StateMachineConfig
+    ) -> None:
+        sm = HealthStateMachine(clock, fast_config)
+        state = RouteRecoveryState()
+        assert state.health is ProviderHealth.DEGRADED
+        signal = signal_from_response(_response(), route_id="r", failure_domain="fd", clock=clock)
+        new_state = sm.apply(state, signal)
+        assert new_state.health is ProviderHealth.HEALTHY
+        assert new_state.consecutive_failures == 0
+
     def test_success_keeps_healthy(
         self, clock: FixedClock, fast_config: StateMachineConfig
     ) -> None:
@@ -378,6 +395,44 @@ class TestHealthStateMachine:
         new_state = sm.apply(state, signal)
         assert new_state.health is ProviderHealth.QUOTA_EXHAUSTED
 
+    def test_known_non_exhausted_quota_preserves_health(
+        self, clock: FixedClock, fast_config: StateMachineConfig
+    ) -> None:
+        sm = HealthStateMachine(clock, fast_config)
+        state = RouteRecoveryState(health=ProviderHealth.HEALTHY)
+        quota = ProviderQuotaState(remaining_fraction=0.95, provider_signal=QuotaSignal.AVAILABLE)
+        signal = signal_from_quota(
+            quota, provider_id="p", route_id="r", failure_domain="fd", clock=clock
+        )
+        new_state = sm.apply(state, signal)
+        assert new_state.health is ProviderHealth.HEALTHY
+        assert new_state.consecutive_failures == 0
+
+    def test_limited_quota_does_not_degrade_provider(
+        self, clock: FixedClock, fast_config: StateMachineConfig
+    ) -> None:
+        sm = HealthStateMachine(clock, fast_config)
+        state = RouteRecoveryState(health=ProviderHealth.HEALTHY)
+        quota = ProviderQuotaState(provider_signal=QuotaSignal.LIMITED)
+        signal = signal_from_quota(
+            quota, provider_id="p", route_id="r", failure_domain="fd", clock=clock
+        )
+        new_state = sm.apply(state, signal)
+        assert new_state.health is ProviderHealth.HEALTHY
+
+    def test_quota_exhausted_recovered_by_non_exhausted_quota(
+        self, clock: FixedClock, fast_config: StateMachineConfig
+    ) -> None:
+        sm = HealthStateMachine(clock, fast_config)
+        state = RouteRecoveryState(health=ProviderHealth.QUOTA_EXHAUSTED)
+        quota = ProviderQuotaState(remaining_fraction=0.5, provider_signal=QuotaSignal.AVAILABLE)
+        signal = signal_from_quota(
+            quota, provider_id="p", route_id="r", failure_domain="fd", clock=clock
+        )
+        new_state = sm.apply(state, signal)
+        assert new_state.health is ProviderHealth.HEALTHY
+        assert new_state.consecutive_failures == 0
+
     def test_health_check_recovers_degraded(
         self, clock: FixedClock, fast_config: StateMachineConfig
     ) -> None:
@@ -429,6 +484,43 @@ class TestHealthStateMachine:
         restored = RouteRecoveryState.from_dict(data)
         assert restored.health is ProviderHealth.RATE_LIMITED
         assert restored.consecutive_failures == state.consecutive_failures
+
+    def test_transition_provenance_survives_round_trip(
+        self, clock: FixedClock, fast_config: StateMachineConfig
+    ) -> None:
+        sm = HealthStateMachine(clock, fast_config)
+        state = RouteRecoveryState(health=ProviderHealth.HEALTHY)
+        response = _response(provider_id="openai", request_id="req-1")
+        signal = signal_from_response(
+            response, route_id="openai-direct", failure_domain="openai", clock=clock
+        )
+        state = sm.apply(state, signal)
+        data = state.to_dict()
+        restored = RouteRecoveryState.from_dict(data)
+        assert len(restored.transition_log) == 1
+        source = restored.transition_log[0].source_signal
+        assert source.provider_id == "openai"
+        assert source.route_id == "openai-direct"
+        assert source.failure_domain == "openai"
+        assert source.kind is SignalKind.SUCCESS
+
+    def test_cooling_is_waiting_state(self) -> None:
+        state = RouteRecoveryState(health=ProviderHealth.COOLING)
+        assert state.needs_recovery_wait()
+        assert not state.is_eligible()
+
+    def test_health_check_recovers_cooling(
+        self, clock: FixedClock, fast_config: StateMachineConfig
+    ) -> None:
+        sm = HealthStateMachine(clock, fast_config)
+        state = RouteRecoveryState(health=ProviderHealth.COOLING)
+        op = ProviderOperationalState(health=ProviderHealth.HEALTHY)
+        signal = signal_from_health_check(
+            op, provider_id="p", route_id="r", failure_domain="fd", clock=clock
+        )
+        new_state = sm.apply(state, signal)
+        assert new_state.health is ProviderHealth.HEALTHY
+        assert new_state.consecutive_failures == 0
 
 
 class TestScheduler:
@@ -719,6 +811,81 @@ class TestOutageSurvival:
         match = match_capabilities(candidate.capabilities, requirement)
         assert match.eligible
 
+    def test_incapable_healthy_candidate_not_dispatched(self, clock: FixedClock) -> None:
+        engine = OutageSurvivalEngine(clock=clock)
+        candidates = [
+            self._candidate(
+                "openai",
+                "review-model",
+                "openai-direct",
+                ProviderHealth.HEALTHY,
+                roles=frozenset({ExecutionRole.REVIEW.value}),
+            )
+        ]
+        decision = engine.dispatch_or_wait(role=ExecutionRole.CODING, candidates=candidates)
+        assert not decision.dispatch
+        assert decision.wait is not None
+        assert decision.wait.reason == "no_capability_eligible_routes"
+
+    def test_capable_candidate_chosen_among_incapable(self, clock: FixedClock) -> None:
+        engine = OutageSurvivalEngine(clock=clock)
+        candidates = [
+            self._candidate(
+                "openai",
+                "review-only",
+                "openai-direct",
+                ProviderHealth.HEALTHY,
+                roles=frozenset({ExecutionRole.REVIEW.value}),
+            ),
+            self._candidate(
+                "anthropic",
+                "claude",
+                "anthropic-direct",
+                ProviderHealth.HEALTHY,
+                roles=frozenset({ExecutionRole.CODING.value}),
+            ),
+        ]
+        decision = engine.dispatch_or_wait(role=ExecutionRole.CODING, candidates=candidates)
+        assert decision.dispatch
+        assert decision.choice is not None
+        assert decision.choice.provider_id == "anthropic"
+
+    def test_optional_requirement_combines_with_role(self, clock: FixedClock) -> None:
+        engine = OutageSurvivalEngine(clock=clock)
+        candidates = [
+            self._candidate(
+                "openai",
+                "gpt-4o",
+                "openai-direct",
+                ProviderHealth.HEALTHY,
+                roles=frozenset({ExecutionRole.CODING.value}),
+            )
+        ]
+        requirement = CapabilityRequirement(tool_use=True)
+        decision = engine.dispatch_or_wait(
+            role=ExecutionRole.CODING,
+            candidates=candidates,
+            requirement=requirement,
+        )
+        assert not decision.dispatch
+        assert decision.wait is not None
+        assert decision.wait.reason == "no_capability_eligible_routes"
+
+    def test_capability_mismatch_does_not_change_health(self, clock: FixedClock) -> None:
+        engine = OutageSurvivalEngine(clock=clock)
+        candidates = [
+            self._candidate(
+                "openai",
+                "review-only",
+                "openai-direct",
+                ProviderHealth.HEALTHY,
+                roles=frozenset({ExecutionRole.REVIEW.value}),
+            )
+        ]
+        engine.dispatch_or_wait(role=ExecutionRole.CODING, candidates=candidates)
+        # Candidate remains operationally healthy; capability mismatch is not an outage.
+        assert candidates[0].recovery_state.health is ProviderHealth.HEALTHY
+
 
 class TestRuntimeStateRecovery:
     def test_migration_1_1_0_to_1_2_0_adds_recovery_fields(self) -> None:
@@ -827,6 +994,176 @@ class TestRuntimeStateRecovery:
             reloaded = runtime_state.load_runtime_state(path)
             assert reloaded["workflow_state"] == "WAITING_FOR_PROVIDER"
             assert reloaded["waiting_tasks"]["task-42"]["task_id"] == "task-42"
+
+
+class TestOutageSurvivalEndToEnd:
+    def _candidate(
+        self,
+        provider_id: str,
+        model_id: str,
+        route_id: str,
+        health: ProviderHealth,
+        roles: frozenset[str] | None = None,
+        quota_domain: str | None = None,
+    ) -> SurvivalCandidate:
+        return SurvivalCandidate(
+            provider_id=provider_id,
+            model_id=model_id,
+            route_id=route_id,
+            capabilities=ModelCapabilities(
+                context_tokens=1000,
+                supported_roles=roles or frozenset({ExecutionRole.CODING.value}),
+            ),
+            recovery_state=RouteRecoveryState(health=health),
+            quota_domain=quota_domain,
+        )
+
+    def test_full_outage_persists_wait_and_checkpoint(self) -> None:
+        from src.recovery.survival import PersistedWait
+
+        clock = FixedClock()
+        engine = OutageSurvivalEngine(clock=clock)
+        candidates = [
+            self._candidate(
+                "openai",
+                "gpt-4o",
+                "openai-direct",
+                ProviderHealth.UNAVAILABLE,
+            ),
+            self._candidate(
+                "anthropic",
+                "claude",
+                "anthropic-direct",
+                ProviderHealth.QUOTA_EXHAUSTED,
+            ),
+        ]
+        decision = engine.dispatch_or_wait(
+            role=ExecutionRole.CODING,
+            candidates=candidates,
+        )
+        assert not decision.dispatch
+        assert decision.wait is not None
+        assert decision.wait.next_recheck_at is not None
+
+        wait = PersistedWait(
+            task_id="task-123",
+            role=ExecutionRole.CODING.value,
+            reason=decision.wait.reason,
+            affected_failure_domains=decision.wait.affected_failure_domains,
+            next_recheck_at=decision.wait.next_recheck_at,
+        )
+        state = {
+            "schema_version": "1.2.0",
+            "run_id": "run-1",
+            "workflow_state": "WAITING_FOR_PROVIDER",
+            "checkpoint": {"phase": "6", "step": "6.5", "task_id": "task-123"},
+            "provider_status": {},
+            "model_status": {},
+            "route_status": {},
+            "routing_mode": "legacy",
+            "exploration_enabled": False,
+            "pins": {},
+            "project_policies": {},
+            "provider_recovery_state": {},
+            "route_recovery_state": {
+                "openai-direct": RouteRecoveryState(health=ProviderHealth.UNAVAILABLE).to_dict(),
+                "anthropic-direct": RouteRecoveryState(
+                    health=ProviderHealth.QUOTA_EXHAUSTED
+                ).to_dict(),
+            },
+            "failure_domain_index": {},
+            "recovery_scheduler": {},
+            "waiting_tasks": {"task-123": wait.to_dict()},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "runtime.json"
+            runtime_state.save_runtime_state(path, state)
+            reloaded = runtime_state.load_runtime_state(path)
+            assert reloaded["workflow_state"] == "WAITING_FOR_PROVIDER"
+            assert reloaded["checkpoint"]["task_id"] == "task-123"
+            assert reloaded["waiting_tasks"]["task-123"]["task_id"] == "task-123"
+
+    def test_recovery_restores_same_task_eligibility(self) -> None:
+        clock = FixedClock()
+        sm = HealthStateMachine(clock)
+        engine = OutageSurvivalEngine(clock=clock)
+        route_state = RouteRecoveryState(health=ProviderHealth.QUOTA_EXHAUSTED)
+
+        # Full outage: no operational or capable capacity.
+        candidates = [
+            self._candidate(
+                "anthropic",
+                "claude",
+                "anthropic-direct",
+                route_state.health,
+            )
+        ]
+        decision = engine.dispatch_or_wait(role=ExecutionRole.CODING, candidates=candidates)
+        assert not decision.dispatch
+        assert decision.wait is not None
+        assert decision.wait.reason == "no_eligible_routes"
+
+        # Simulate recovery: quota reset and a verified health check.
+        recovered_state = sm.apply(
+            route_state,
+            signal_from_quota(
+                ProviderQuotaState(provider_signal=QuotaSignal.AVAILABLE),
+                provider_id="anthropic",
+                route_id="anthropic-direct",
+                failure_domain="anthropic",
+                clock=clock,
+            ),
+        )
+        op = ProviderOperationalState(health=ProviderHealth.HEALTHY)
+        recovered_state = sm.apply(
+            recovered_state,
+            signal_from_health_check(
+                op,
+                provider_id="anthropic",
+                route_id="anthropic-direct",
+                failure_domain="anthropic",
+                clock=clock,
+            ),
+        )
+        candidates = [
+            SurvivalCandidate(
+                provider_id="anthropic",
+                model_id="claude",
+                route_id="anthropic-direct",
+                capabilities=ModelCapabilities(
+                    context_tokens=1000,
+                    supported_roles=frozenset({ExecutionRole.CODING.value}),
+                ),
+                recovery_state=recovered_state,
+            )
+        ]
+        decision = engine.dispatch_or_wait(role=ExecutionRole.CODING, candidates=candidates)
+        assert decision.dispatch
+        assert decision.choice is not None
+        assert decision.choice.route_id == "anthropic-direct"
+
+    def test_partial_outage_uses_independent_fallback(self) -> None:
+        engine = OutageSurvivalEngine(clock=FixedClock())
+        candidates = [
+            self._candidate(
+                "openai",
+                "gpt-4o",
+                "openai-direct",
+                ProviderHealth.UNAVAILABLE,
+                quota_domain="openai",
+            ),
+            self._candidate(
+                "anthropic",
+                "claude",
+                "anthropic-direct",
+                ProviderHealth.HEALTHY,
+                quota_domain="anthropic",
+            ),
+        ]
+        decision = engine.dispatch_or_wait(role=ExecutionRole.CODING, candidates=candidates)
+        assert decision.dispatch
+        assert decision.choice is not None
+        assert decision.choice.provider_id == "anthropic"
 
 
 class TestTelemetry:
