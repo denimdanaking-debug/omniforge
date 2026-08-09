@@ -31,7 +31,14 @@ class ArbitrationEvidencePacket:
     provenance_index: dict[str, ProvenanceRef]
 
     def to_context_packet(self) -> ContextPacket:
-        """Convert arbitration evidence into a canonical context packet."""
+        """Convert arbitration evidence into a canonical context packet.
+
+        This method does NOT manufacture missing provenance. Any evidence or
+        authority reference that is not already present in ``provenance_index``
+        will be represented as an authority item with empty immutable metadata,
+        which the validator rejects. Callers must supply canonical provenance
+        for every ref they expect to survive validation.
+        """
         provenance_index = dict(self.provenance_index)
 
         authority: list[AuthorityContextItem] = []
@@ -57,19 +64,9 @@ class ArbitrationEvidencePacket:
                         full_source_ref=ref,
                         revision="",
                         content_hash="",
-                        content=ref,
-                        raw_included=True,
+                        content=None,
+                        raw_included=False,
                     )
-                )
-
-        for item in authority:
-            if item.provenance_id not in provenance_index:
-                provenance_index[item.provenance_id] = ProvenanceRef(
-                    source_type="authority",
-                    path=item.full_source_ref,
-                    authority_level="roadmap",
-                    revision=item.revision or None,
-                    content_hash=item.content_hash or None,
                 )
 
         all_evidence_refs: list[str] = []
@@ -77,11 +74,6 @@ class ArbitrationEvidencePacket:
         for finding in self.disputed_findings:
             all_evidence_refs.extend(finding.evidence_refs)
             all_positions.extend(finding.positions)
-            for ref in finding.evidence_refs:
-                if ref not in provenance_index:
-                    provenance_index[ref] = ProvenanceRef(
-                        source_type="arbitration_evidence", path=ref
-                    )
 
         arbitration = ArbitrationContext(
             dispute_id=self.dispute_id,

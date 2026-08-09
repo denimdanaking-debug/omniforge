@@ -235,7 +235,14 @@ def test_validator_catches_raw_referenced_missing_immutable_provenance() -> None
         },
     )
     issues = ContextPacketValidator().validate(packet)
-    assert any(issue.code == "RAW_REFERENCED_MISSING_IMMUTABLE_PROVENANCE" for issue in issues)
+    assert any(
+        issue.code
+        in {
+            "AUTHORITY_ITEM_MISSING_IMMUTABLE_IDENTITY",
+            "AUTHORITY_PROVENANCE_MISSING_REVISION_OR_HASH",
+        }
+        for issue in issues
+    )
 
 
 # REPAIR 3: arbitration separation
@@ -434,3 +441,58 @@ def test_raw_authority_with_revision_and_hash_passes_validation() -> None:
     )
     issues = ContextPacketValidator().validate(packet)
     assert not issues
+
+
+_RICH_AUTHORITY_ENTRY = {
+    "authority_id": "auth-roadmap",
+    "provenance_id": "auth-roadmap",
+    "full_source_ref": "docs/roadmap.md",
+    "revision": _FAKE_COMMIT,
+    "content_hash": _FAKE_HASH,
+    "content": "authoritative roadmap text",
+    "raw_included": True,
+}
+
+
+@pytest.mark.parametrize(
+    "strategy_cls",
+    [
+        TargetedContextStrategy,
+        HybridContextStrategy,
+        HierarchicalContextStrategy,
+        LargeContextStrategy,
+    ],
+)
+def test_strategy_preserves_rich_authority_identity(strategy_cls: type) -> None:
+    """Every Phase 7 strategy must keep revision/hash when authority is required."""
+    request = ContextBuildRequest(
+        task_id="strategy-auth-test",
+        role=ExecutionRole.CODING,
+        risk=RiskLevel.R2_NORMAL,
+        model_capabilities=ModelCapabilities(context_tokens=4096),
+        authority_refs=(),
+        authority_entries=(_RICH_AUTHORITY_ENTRY,),
+        changed_files=("src/a.py",),
+        constraints=("must pass tests",),
+        explicit_paths=("src/b.py",),
+        referenced_symbols=("func_a",),
+        budget=ContextBudget(primary_budget=10_000),
+    )
+    strategy = strategy_cls()
+    result = strategy.build(request)
+    assert result.packet.authority
+    item = result.packet.authority[0]
+    assert item.revision == _FAKE_COMMIT
+    assert item.content_hash == _FAKE_HASH
+    assert item.provenance_id == "auth-roadmap"
+    issues = ContextPacketValidator().validate(result.packet)
+    authority_issue_codes = {
+        "AUTHORITY_ITEM_MISSING_IMMUTABLE_IDENTITY",
+        "AUTHORITY_REVISION_MISMATCH",
+        "AUTHORITY_HASH_MISMATCH",
+        "AUTHORITY_DANGLING_PROVENANCE",
+        "AUTHORITY_REF_NOT_AUTHORITY_SOURCE",
+        "AUTHORITY_PROVENANCE_MISSING_LEVEL",
+        "AUTHORITY_PROVENANCE_MISSING_REVISION_OR_HASH",
+    }
+    assert not any(issue.code in authority_issue_codes for issue in issues)

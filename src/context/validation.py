@@ -69,50 +69,82 @@ class ContextPacketValidator:
     def _check_authority_immutability(self, packet: ContextPacket) -> list[ValidationIssue]:
         issues: list[ValidationIssue] = []
         for item in packet.authority:
-            if not item.raw_included:
-                if not item.revision or not item.content_hash:
-                    issues.append(
-                        ValidationIssue(
-                            severity="error",
-                            code="RAW_REFERENCED_MISSING_IMMUTABLE_PROVENANCE",
-                            message=f"Authority item {item.authority_id!r} is RAW_REFERENCED but "
-                            "missing revision or content_hash",
-                        )
+            if not item.revision or not item.content_hash:
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        code="AUTHORITY_ITEM_MISSING_IMMUTABLE_IDENTITY",
+                        message=f"Authority item {item.authority_id!r} is missing revision or "
+                        "content_hash",
                     )
-                provenance = packet.provenance_index.get(item.provenance_id)
-                if provenance is not None and (
-                    not provenance.revision or not provenance.content_hash
-                ):
-                    issues.append(
-                        ValidationIssue(
-                            severity="error",
-                            code="AUTHORITY_PROVENANCE_MISSING_REVISION_OR_HASH",
-                            message=f"Authority provenance {item.provenance_id!r} is missing "
-                            "revision or content_hash",
-                        )
+                )
+            if item.raw_included and item.content is None:
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        code="RAW_INCLUDED_MISSING_CONTENT",
+                        message=f"Authority item {item.authority_id!r} is RAW_INCLUDED but "
+                        "has no content",
                     )
-            else:
-                if item.content is None:
-                    issues.append(
-                        ValidationIssue(
-                            severity="error",
-                            code="RAW_INCLUDED_MISSING_CONTENT",
-                            message=f"Authority item {item.authority_id!r} is RAW_INCLUDED but "
-                            "has no content",
-                        )
+                )
+            provenance = packet.provenance_index.get(item.provenance_id)
+            if provenance is None:
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        code="AUTHORITY_DANGLING_PROVENANCE",
+                        message=f"Authority item {item.authority_id!r} references unknown "
+                        f"provenance {item.provenance_id!r}",
                     )
-                provenance = packet.provenance_index.get(item.provenance_id)
-                if provenance is not None and (
-                    not provenance.revision or not provenance.content_hash
-                ):
-                    issues.append(
-                        ValidationIssue(
-                            severity="warning",
-                            code="AUTHORITY_PROVENANCE_MISSING_REVISION_OR_HASH",
-                            message=f"Raw authority provenance {item.provenance_id!r} should "
-                            "include revision and content_hash",
-                        )
+                )
+                continue
+            if provenance.source_type != "authority":
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        code="AUTHORITY_REF_NOT_AUTHORITY_SOURCE",
+                        message=f"Authority item {item.authority_id!r} resolves to "
+                        f"source_type={provenance.source_type!r}, not 'authority'",
                     )
+                )
+            if not provenance.authority_level:
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        code="AUTHORITY_PROVENANCE_MISSING_LEVEL",
+                        message=f"Authority provenance {item.provenance_id!r} is missing "
+                        "authority_level",
+                    )
+                )
+            if not provenance.revision or not provenance.content_hash:
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        code="AUTHORITY_PROVENANCE_MISSING_REVISION_OR_HASH",
+                        message=f"Authority provenance {item.provenance_id!r} is missing "
+                        "revision or content_hash",
+                    )
+                )
+            if provenance.revision != item.revision:
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        code="AUTHORITY_REVISION_MISMATCH",
+                        message=f"Authority item {item.authority_id!r} revision "
+                        f"{item.revision!r} does not match provenance revision "
+                        f"{provenance.revision!r}",
+                    )
+                )
+            if provenance.content_hash != item.content_hash:
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        code="AUTHORITY_HASH_MISMATCH",
+                        message=f"Authority item {item.authority_id!r} content_hash "
+                        f"{item.content_hash!r} does not match provenance content_hash "
+                        f"{provenance.content_hash!r}",
+                    )
+                )
         return issues
 
     def _check_dangling_provenance(self, packet: ContextPacket) -> list[ValidationIssue]:
@@ -291,5 +323,47 @@ class ContextPacketValidator:
                         message=f"Finding {finding.finding_id!r} has no evidence refs",
                     )
                 )
+            for ref in finding.authority_refs:
+                if ref not in packet.provenance_index:
+                    issues.append(
+                        ValidationIssue(
+                            severity="error",
+                            code="ARBITRATION_FINDING_DANGLING_AUTHORITY_REF",
+                            message=f"Finding {finding.finding_id!r} authority ref {ref!r} "
+                            "has no provenance",
+                        )
+                    )
+                else:
+                    provenance = packet.provenance_index[ref]
+                    if provenance.source_type != "authority":
+                        issues.append(
+                            ValidationIssue(
+                                severity="error",
+                                code="ARBITRATION_FINDING_AUTHORITY_REF_NOT_AUTHORITY",
+                                message=f"Finding {finding.finding_id!r} authority ref {ref!r} "
+                                f"is source_type={provenance.source_type!r}, not 'authority'",
+                            )
+                        )
+
+        for ref in arbitration.authority_refs:
+            if ref not in packet.provenance_index:
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        code="ARBITRATION_DANGLING_AUTHORITY_REF",
+                        message=f"Arbitration authority ref {ref!r} has no provenance",
+                    )
+                )
+            else:
+                provenance = packet.provenance_index[ref]
+                if provenance.source_type != "authority":
+                    issues.append(
+                        ValidationIssue(
+                            severity="error",
+                            code="ARBITRATION_AUTHORITY_REF_NOT_AUTHORITY",
+                            message=f"Arbitration authority ref {ref!r} is "
+                            f"source_type={provenance.source_type!r}, not 'authority'",
+                        )
+                    )
 
         return issues
