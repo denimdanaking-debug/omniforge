@@ -6,11 +6,26 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any
 
+from src.context.schema import ContextPacket
 from src.policy.risk import RiskLevel
 from src.providers.identity import ProviderIdentity
 from src.routing.inference_route import InferenceRouteIdentity
 from src.routing.model_identity import ModelIdentity
 from src.routing.roles import ExecutionRole
+
+__all__ = [
+    "CapabilityRequirement",
+    "ContextPacket",
+    "Message",
+    "MessageRole",
+    "ProviderRequest",
+    "ReasoningMode",
+    "StructuredOutputRequirement",
+    "TaskLineage",
+    "ToolChoiceMode",
+    "ToolDefinition",
+    "ToolParameter",
+]
 
 
 class MessageRole(Enum):
@@ -72,16 +87,6 @@ class ToolDefinition:
     name: str
     description: str
     parameters: list[ToolParameter] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class ContextPacket:
-    """Structured context packet with provenance."""
-
-    kind: str
-    source: str
-    payload: dict[str, Any] = field(default_factory=dict)
-    priority: int = 0
 
 
 @dataclass(frozen=True)
