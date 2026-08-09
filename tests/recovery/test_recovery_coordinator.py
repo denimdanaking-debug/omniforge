@@ -30,6 +30,7 @@ from src.recovery.state_machine import RouteRecoveryState
 from src.routing.capabilities import ModelCapabilities
 from src.routing.inference_route import InferenceRouteIdentity, RouteType
 from src.routing.model_identity import ModelIdentity
+from src.routing.policy import RoutingPin
 from src.routing.roles import ExecutionRole
 
 
@@ -57,7 +58,10 @@ def _candidate(
     context_tokens: int = 1000,
     failure_domain: str = "",
     quota: ProviderQuotaState | None = None,
+    supported_roles: frozenset[str] | None = None,
 ) -> RecoveryCandidate:
+    if supported_roles is None:
+        supported_roles = frozenset({ExecutionRole.CODING.value})
     return RecoveryCandidate(
         provider_id=provider_id,
         model_id=model_id,
@@ -72,7 +76,7 @@ def _candidate(
         ),
         capabilities=ModelCapabilities(
             context_tokens=context_tokens,
-            supported_roles=frozenset({ExecutionRole.CODING.value}),
+            supported_roles=supported_roles,
         ),
         recovery_state=RouteRecoveryState(health=health),
         quota=quota,
@@ -321,14 +325,14 @@ class TestQuota:
     def test_pinned_exhausted_target_not_silently_bypassed(
         self, clock: FixedClock, policy: FailureRecoveryPolicy
     ) -> None:
-        pin = _candidate(
-            "openai",
-            "gpt-4o",
-            "openai-direct",
-            quota=ProviderQuotaState(provider_signal=QuotaSignal.EXHAUSTED),
-        )
+        pin = RoutingPin(provider_id="openai", model_id="gpt-4o", route_id="openai-direct")
         candidates = (
-            pin,
+            _candidate(
+                "openai",
+                "gpt-4o",
+                "openai-direct",
+                quota=ProviderQuotaState(provider_signal=QuotaSignal.EXHAUSTED),
+            ),
             _candidate("anthropic", "claude", "anthropic-direct"),
         )
         inputs = FailureClassifierInput(
@@ -526,7 +530,12 @@ class TestPlanning:
             )
         candidates = (
             _candidate("openai", "gpt-4o", "openai-direct"),
-            _candidate("anthropic", "claude", "anthropic-direct"),
+            _candidate(
+                "anthropic",
+                "claude",
+                "anthropic-direct",
+                supported_roles=frozenset({ExecutionRole.PLANNING.value}),
+            ),
         )
         inputs = FailureClassifierInput(
             task_id="task-1",
@@ -677,7 +686,13 @@ class TestContextOverflow:
             )
         candidates = (
             _candidate("openai", "gpt-4o", "openai-direct", context_tokens=1000),
-            _candidate("anthropic", "claude", "anthropic-direct", context_tokens=10000),
+            _candidate(
+                "anthropic",
+                "claude",
+                "anthropic-direct",
+                context_tokens=10000,
+                supported_roles=frozenset({ExecutionRole.CODING.value}),
+            ),
         )
         inputs = FailureClassifierInput(
             task_id="task-1",
@@ -686,6 +701,7 @@ class TestContextOverflow:
                 estimated_input_chars=5000,
                 model_context_tokens=1000,
                 authority_required=True,
+                authority_items_raw=2,
                 rebuild_attempts=policy.max_context_rebuilds,
             ),
             provider_id="openai",

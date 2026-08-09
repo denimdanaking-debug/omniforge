@@ -589,6 +589,8 @@ class TestContextRecovery:
             strategy_name="compact",
             authority_presence="raw",
             estimated_input_chars=5000,
+            estimated_input_tokens=1250,
+            required_context_tokens=1250,
             excluded_material=(),
             authority_items_present=1,
             authority_items_raw=1,

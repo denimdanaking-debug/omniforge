@@ -50,6 +50,7 @@ class FailureAttemptRecord:
     retry_after: datetime.datetime | None = None
     context_rebuild_number: int = 0
     repair_number: int = 0
+    transition_fingerprint: str = ""
 
     def __post_init__(self) -> None:
         if self.attempt_index < 0:
@@ -74,6 +75,7 @@ class FailureAttemptRecord:
             "retry_after": isoformat(self.retry_after) if self.retry_after else None,
             "context_rebuild_number": self.context_rebuild_number,
             "repair_number": self.repair_number,
+            "transition_fingerprint": self.transition_fingerprint,
         }
 
     @classmethod
@@ -98,6 +100,7 @@ class FailureAttemptRecord:
             retry_after=retry_after,
             context_rebuild_number=int(data.get("context_rebuild_number", 0)),
             repair_number=int(data.get("repair_number", 0)),
+            transition_fingerprint=str(data.get("transition_fingerprint", "")),
         )
 
 

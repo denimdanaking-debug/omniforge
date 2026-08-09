@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 
+from src.context.budget import estimate_tokens
 from src.policy.risk import RiskLevel
 from src.providers.errors import ProviderError, ProviderErrorCode
 from src.routing.roles import ExecutionRole
@@ -130,7 +131,9 @@ class ContextOverflowMetadata:
     """Context-overflow-specific metadata for classification."""
 
     estimated_input_chars: int | None = None
+    estimated_input_tokens: int | None = None
     model_context_tokens: int | None = None
+    required_context_tokens: int | None = None
     authority_required: bool = False
     authority_items_present: int = 0
     authority_items_raw: int = 0
@@ -265,23 +268,26 @@ class FailureClassifier:
         if inputs.provider_error is not None:
             return self._classify_provider_error(inputs)
 
-        if inputs.context_overflow is not None and (
-            inputs.context_overflow.estimated_input_chars is not None
-            and inputs.context_overflow.model_context_tokens is not None
-            and inputs.context_overflow.estimated_input_chars
-            > inputs.context_overflow.model_context_tokens
-        ):
-            return self._build(
-                inputs,
-                FailureCategory.CONTEXT_CAPACITY,
-                FailureSubtype.CONTEXT_OVERFLOW,
-                Retryability.BOUNDED,
-                model_quality_effect=False,
-                provider_health_effect=False,
-                route_health_effect=False,
-                recommended_action_class="REBUILD_CONTEXT",
-                explanation="Context overflow requires context-aware recovery.",
-            )
+        overflow = inputs.context_overflow
+        if overflow is not None:
+            required_tokens = overflow.required_context_tokens
+            if required_tokens is None and overflow.estimated_input_tokens is not None:
+                required_tokens = overflow.estimated_input_tokens
+            elif required_tokens is None and overflow.estimated_input_chars is not None:
+                required_tokens = estimate_tokens(overflow.estimated_input_chars)
+            capacity = overflow.model_context_tokens
+            if required_tokens is not None and capacity is not None and required_tokens > capacity:
+                return self._build(
+                    inputs,
+                    FailureCategory.CONTEXT_CAPACITY,
+                    FailureSubtype.CONTEXT_OVERFLOW,
+                    Retryability.BOUNDED,
+                    model_quality_effect=False,
+                    provider_health_effect=False,
+                    route_health_effect=False,
+                    recommended_action_class="REBUILD_CONTEXT",
+                    explanation="Context overflow requires context-aware recovery.",
+                )
 
         if inputs.planning_validation is not None and (
             inputs.planning_validation.missing_steps

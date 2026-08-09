@@ -1,8 +1,9 @@
 """Failure-type-aware recovery coordinator.
 
 Turns a FailureClassification, retry history, risk assessment, and eligible
-candidates into a deterministic RecoveryDecision. No provider calls are made
-inside the coordinator; it consumes normalized state only.
+candidates into a deterministic RecoveryDecision. Recovery rerouting reuses the
+Phase 8 ``CandidateEligibilityPipeline`` so ineligible candidates cannot be
+resurrected. No provider calls are made inside the coordinator.
 """
 
 from __future__ import annotations
@@ -12,22 +13,26 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from src.policy.risk import RiskLevel, lifecycle_eligible
-from src.providers.identity import ProviderQuotaState
+from src.context.budget import BudgetType, ContextBudget, compute_usable_budget, estimate_tokens
+from src.policy.risk import RiskLevel
+from src.providers.identity import ProviderOperationalState, ProviderQuotaState
 from src.recovery.backoff import BackoffPolicy
 from src.recovery.clock import Clock
+from src.recovery.eligibility import _required_context_tokens, evaluate_recovery_eligibility
 from src.recovery.failure_classification import (
     FailureCategory,
     FailureClassification,
     FailureClassifier,
     FailureClassifierInput,
 )
+from src.recovery.fingerprint import recovery_input_fingerprint
 from src.recovery.retry_policy import FailureRecoveryPolicy
-from src.recovery.retry_state import RetryLedger, WaitState
+from src.recovery.retry_state import FailureAttemptRecord, RetryLedger, RetryType, WaitState
 from src.recovery.state_machine import RouteRecoveryState
-from src.routing.capabilities import CapabilityRequirement, ModelCapabilities, match_capabilities
-from src.routing.inference_route import InferenceRouteIdentity
+from src.routing.capabilities import CapabilityRequirement, ModelCapabilities
+from src.routing.inference_route import InferenceRouteIdentity, RouteOperationalState
 from src.routing.model_identity import ModelIdentity
+from src.routing.policy import RoutingPin
 from src.routing.roles import ExecutionRole
 
 
@@ -62,6 +67,8 @@ class RecoveryCandidate:
     quota: ProviderQuotaState | None = None
     quota_domain: str | None = None
     failure_domain: str = ""
+    operational_state: ProviderOperationalState | None = None
+    route_cost_state: RouteOperationalState | None = None
 
     @property
     def key(self) -> str:
@@ -75,6 +82,7 @@ class RecoveryDecision:
     action: RecoveryAction
     classification: FailureClassification
     failure_signature: str
+    deterministic_input_fingerprint: str
     retry_allowed: bool
     selected_candidate: RecoveryCandidate | None
     require_reroute: bool
@@ -86,7 +94,7 @@ class RecoveryDecision:
     attempt_counters: dict[str, int]
     terminal: bool
     explanation: str
-    deterministic_input_fingerprint: str
+    transition_fingerprint: str = ""
 
 
 @dataclass(frozen=True)
@@ -98,9 +106,19 @@ class RecoveryCoordinatorInput:
     ledger: RetryLedger
     policy: FailureRecoveryPolicy
     current_risk: RiskLevel
-    pin: RecoveryCandidate | None = None
+    project_id: str = "default"
+    project_policy: Any | None = None
+    provider_enabled: dict[str, bool] | None = None
+    model_enabled: dict[str, bool] | None = None
+    route_enabled: dict[str, bool] | None = None
+    capability_requirement: CapabilityRequirement | None = None
+    required_context_tokens: int | None = None
+    pin: RoutingPin | None = None
     reserve_policy: Any | None = None
+    failure_domain_index: Any | None = None
     quota_domain_states: dict[str, ProviderQuotaState] | None = None
+    reviewer_identities: tuple[str, ...] = ()
+    coder_identities: tuple[str, ...] = ()
     role: ExecutionRole | None = None
 
 
@@ -123,13 +141,17 @@ class RecoveryCoordinator:
         signature = classification.deterministic_fingerprint
         ledger = inputs.ledger
 
-        # Check global bounds first.
-        total = ledger.attempt_count
-        if total >= inputs.policy.max_total_attempts:
+        # Canonical Phase 8 eligibility is applied to the candidate fleet first.
+        eligible_candidates, _exclusions = evaluate_recovery_eligibility(inputs)
+        fingerprint = recovery_input_fingerprint(inputs, classification, eligible_candidates)
+
+        # Global bounds.
+        if ledger.attempt_count >= inputs.policy.max_total_attempts:
             return self._terminal(
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 RecoveryAction.BLOCK,
                 "max_total_attempts reached",
                 attempt_counters=self._counters(ledger),
@@ -141,73 +163,197 @@ class RecoveryCoordinator:
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 RecoveryAction.BLOCK,
                 "max_same_signature_attempts reached",
                 attempt_counters=self._counters(ledger),
             )
 
-        # Category-specific dispatch.
         if classification.category is FailureCategory.CANCELLED:
             return self._terminal(
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 RecoveryAction.CANCEL,
                 "cancelled: no auto-retry",
                 attempt_counters=self._counters(ledger),
             )
 
         if classification.category is FailureCategory.AUTHORITY_VIOLATION:
-            return self._handle_authority_violation(inputs, classification, signature)
+            return self._handle_authority_violation(inputs, classification, signature, fingerprint)
 
         if classification.category is FailureCategory.CONTEXT_CAPACITY:
-            return self._handle_context_overflow(inputs, classification, signature)
+            return self._handle_context_overflow(inputs, classification, signature, fingerprint)
 
         if classification.category in {
             FailureCategory.INFRASTRUCTURE_TRANSIENT,
             FailureCategory.INFRASTRUCTURE_UNAVAILABLE,
         }:
-            return self._handle_infrastructure_transient(inputs, classification, signature)
+            return self._handle_infrastructure_transient(
+                inputs, classification, signature, fingerprint, eligible_candidates
+            )
 
         if classification.category is FailureCategory.INFRASTRUCTURE_QUOTA:
-            return self._handle_quota_exhaustion(inputs, classification, signature)
+            return self._handle_quota_exhaustion(
+                inputs, classification, signature, fingerprint, eligible_candidates
+            )
 
         if classification.category is FailureCategory.INFRASTRUCTURE_AUTH:
-            return self._handle_auth_failure(inputs, classification, signature)
+            return self._handle_auth_failure(
+                inputs, classification, signature, fingerprint, eligible_candidates
+            )
 
         if classification.category is FailureCategory.CAPABILITY_MISMATCH:
-            return self._handle_capability_mismatch(inputs, classification, signature)
+            return self._handle_capability_mismatch(
+                inputs, classification, signature, fingerprint, eligible_candidates
+            )
 
         if classification.category is FailureCategory.STRUCTURED_OUTPUT_INVALID:
-            return self._handle_structured_output_invalid(inputs, classification, signature)
+            return self._handle_structured_output_invalid(
+                inputs, classification, signature, fingerprint
+            )
 
         if classification.category is FailureCategory.PLANNING_OUTPUT_INVALID:
-            return self._handle_planning_output_invalid(inputs, classification, signature)
+            return self._handle_planning_output_invalid(
+                inputs, classification, signature, fingerprint
+            )
 
         if classification.category is FailureCategory.IMPLEMENTATION_DETERMINISTIC:
-            return self._handle_deterministic_implementation(inputs, classification, signature)
+            return self._handle_deterministic_implementation(
+                inputs, classification, signature, fingerprint
+            )
 
         if classification.category is FailureCategory.IMPLEMENTATION_CONCEPTUAL:
-            return self._handle_conceptual_implementation(inputs, classification, signature)
+            return self._handle_conceptual_implementation(
+                inputs, classification, signature, fingerprint, eligible_candidates
+            )
 
         if classification.category is FailureCategory.INTEGRATION_FAILURE:
             return self._terminal(
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 RecoveryAction.BLOCK,
                 "integration anomaly: block for review",
                 require_risk_escalation=True,
                 attempt_counters=self._counters(ledger),
             )
 
-        return self._handle_unknown(inputs, classification, signature)
+        return self._handle_unknown(inputs, classification, signature, fingerprint)
+
+    def decide_and_record(
+        self,
+        inputs: RecoveryCoordinatorInput,
+        timestamp: datetime.datetime | None = None,
+    ) -> RecoveryDecision:
+        """Return a decision and atomically record the retry-state transition."""
+        decision = self.decide(inputs)
+        return self.apply_decision(inputs, decision, timestamp)
+
+    def apply_decision(
+        self,
+        inputs: RecoveryCoordinatorInput,
+        decision: RecoveryDecision,
+        timestamp: datetime.datetime | None = None,
+    ) -> RecoveryDecision:
+        """Record a decision into the ledger exactly once."""
+        ledger = inputs.ledger
+        transition_fingerprint = decision.deterministic_input_fingerprint
+        if any(r.transition_fingerprint == transition_fingerprint for r in ledger.records):
+            # Already committed this exact transition.
+            return decision
+
+        now = timestamp or self._now()
+        retry_type = self._retry_type_for_action(decision.action)
+
+        candidate = decision.selected_candidate or self._current_candidate(inputs)
+        provider_id = candidate.provider_id if candidate is not None else None
+        model_id = candidate.model_id if candidate is not None else None
+        route_id = candidate.route_id if candidate is not None else None
+
+        record = FailureAttemptRecord(
+            attempt_index=ledger.total_attempt_index,
+            failure_category=decision.classification.category.value,
+            failure_subtype=decision.classification.subtype.value,
+            failure_signature=decision.failure_signature,
+            provider_id=provider_id,
+            model_id=model_id,
+            route_id=route_id,
+            action_taken=decision.action.value,
+            retry_type=retry_type,
+            timestamp=now,
+            retry_after=decision.retry_after,
+            context_rebuild_number=ledger.context_rebuild_count(),
+            repair_number=ledger.repair_count(),
+            transition_fingerprint=transition_fingerprint,
+        )
+        ledger.records.append(record)
+
+        if decision.action is RecoveryAction.REBUILD_CONTEXT:
+            ledger.current_context_rebuild = dict(self._context_evidence(inputs))
+            ledger.current_context_rebuild["rebuild_number"] = ledger.context_rebuild_count()
+
+        if decision.terminal or self._retry_path_exhausted(decision, inputs):
+            ledger.mark_exhausted_path(decision.failure_signature, provider_id, model_id)
+
+        if decision.action is not RecoveryAction.WAIT_FOR_PROVIDER:
+            ledger.clear_wait()
+
+        object.__setattr__(decision, "transition_fingerprint", transition_fingerprint)
+        return decision
+
+    def _retry_path_exhausted(
+        self, decision: RecoveryDecision, inputs: RecoveryCoordinatorInput
+    ) -> bool:
+        """Return True when a bounded local retry path has reached its limit."""
+        policy = inputs.policy
+        ledger = inputs.ledger
+        action = decision.action
+        if action is RecoveryAction.BLOCK:
+            return False
+        if action in {RecoveryAction.REROUTE_MODEL, RecoveryAction.REROUTE_PROVIDER}:
+            # Switching away means the prior local path is exhausted for this signature.
+            return True
+        if action is RecoveryAction.CROSS_MODEL_REPAIR:
+            return True
+        if action is RecoveryAction.WAIT_FOR_PROVIDER:
+            return False
+        if action is RecoveryAction.REBUILD_CONTEXT:
+            return ledger.context_rebuild_count() >= policy.max_context_rebuilds
+        if action is RecoveryAction.CONSTRAINED_OUTPUT_RETRY:
+            return ledger.constrained_output_retry_count() >= policy.max_structured_output_retries
+        if action is RecoveryAction.REPLAN:
+            return ledger.planning_retry_count() >= policy.max_planning_retries
+        if action is RecoveryAction.REPAIR_WITH_EVIDENCE:
+            return ledger.repair_count() >= policy.max_same_model_repairs
+        return False
+
+    def _retry_type_for_action(self, action: RecoveryAction) -> RetryType:
+        mapping = {
+            RecoveryAction.RETRY_SAME_ROUTE: RetryType.TRANSIENT_RETRY,
+            RecoveryAction.RETRY_ALTERNATE_ROUTE: RetryType.REROUTE_ROUTE,
+            RecoveryAction.REROUTE_PROVIDER: RetryType.REROUTE_PROVIDER,
+            RecoveryAction.REROUTE_MODEL: RetryType.REROUTE_MODEL,
+            RecoveryAction.CONSTRAINED_OUTPUT_RETRY: RetryType.CONSTRAINED_OUTPUT_RETRY,
+            RecoveryAction.REPLAN: RetryType.REPLAN,
+            RecoveryAction.REPAIR_WITH_EVIDENCE: RetryType.REPAIR,
+            RecoveryAction.CROSS_MODEL_REPAIR: RetryType.CROSS_MODEL_REPAIR,
+            RecoveryAction.REBUILD_CONTEXT: RetryType.REBUILD_CONTEXT,
+            RecoveryAction.WAIT_FOR_PROVIDER: RetryType.WAIT_FOR_PROVIDER,
+            RecoveryAction.BLOCK: RetryType.BLOCK,
+            RecoveryAction.CANCEL: RetryType.CANCEL,
+        }
+        return mapping[action]
 
     def _handle_infrastructure_transient(
         self,
         inputs: RecoveryCoordinatorInput,
         classification: FailureClassification,
         signature: str,
+        fingerprint: str,
+        eligible_candidates: tuple[RecoveryCandidate, ...],
     ) -> RecoveryDecision:
         ledger = inputs.ledger
         if ledger.transient_retry_count() >= inputs.policy.max_transient_retries:
@@ -215,18 +361,20 @@ class RecoveryCoordinator:
                 inputs,
                 classification,
                 signature,
+                fingerprint,
+                eligible_candidates,
                 "transient retry budget exhausted",
             )
 
-        # If same signature repeated, prefer cross-provider reroute.
         cross_provider_threshold = inputs.policy.require_cross_provider_after_same_signature
         if ledger.signature_count(signature) >= cross_provider_threshold:
-            candidate = self._select_cross_provider_candidate(inputs)
+            candidate = self._select_cross_provider_candidate(inputs, eligible_candidates)
             if candidate is not None:
                 return self._reroute(
                     inputs,
                     classification,
                     signature,
+                    fingerprint,
                     candidate,
                     RecoveryAction.REROUTE_PROVIDER,
                     "repeated transient signature: cross-provider reroute",
@@ -235,31 +383,53 @@ class RecoveryCoordinator:
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 "no_cross_provider_alternative_for_repeated_transient",
             )
 
-        # Prefer alternate route if available.
-        alternate = self._select_alternate_route(inputs)
+        # Same-route consecutive infrastructure retry bound.
+        consecutive = self._consecutive_same_route_infrastructure_retries(inputs, signature)
+        if consecutive >= inputs.policy.max_consecutive_infrastructure_retries:
+            candidate = self._select_alternate_route(inputs, eligible_candidates)
+            if candidate is not None:
+                return self._reroute(
+                    inputs,
+                    classification,
+                    signature,
+                    fingerprint,
+                    candidate,
+                    RecoveryAction.RETRY_ALTERNATE_ROUTE,
+                    "consecutive same-route retries exceeded: alternate route",
+                )
+            return self._wait(
+                inputs,
+                classification,
+                signature,
+                fingerprint,
+                "no_alternate_route_for_consecutive_retries",
+            )
+
+        alternate = self._select_alternate_route(inputs, eligible_candidates)
         if alternate is not None:
             return self._reroute(
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 alternate,
                 RecoveryAction.RETRY_ALTERNATE_ROUTE,
                 "alternate eligible route available",
             )
 
-        # Provider unavailable with no alternate should wait, not retry same route.
         if classification.category is FailureCategory.INFRASTRUCTURE_UNAVAILABLE:
             return self._wait(
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 "no_alternate_route_available",
             )
 
-        # Bounded retry on same route with backoff metadata.
         attempt = ledger.transient_retry_count()
         delay = self._backoff.delay_for_attempt(attempt)
         now = self._now()
@@ -267,8 +437,9 @@ class RecoveryCoordinator:
             action=RecoveryAction.RETRY_SAME_ROUTE,
             classification=classification,
             failure_signature=signature,
+            deterministic_input_fingerprint=fingerprint,
             retry_allowed=True,
-            selected_candidate=inputs.pin or self._current_candidate(inputs),
+            selected_candidate=self._current_candidate(inputs),
             require_reroute=False,
             require_context_rebuild=False,
             require_risk_escalation=False,
@@ -281,30 +452,47 @@ class RecoveryCoordinator:
                 "Transient infrastructure failure: bounded retry on same route "
                 f"after {delay}s backoff; model quality unaffected."
             ),
-            deterministic_input_fingerprint=signature,
         )
+
+    def _consecutive_same_route_infrastructure_retries(
+        self, inputs: RecoveryCoordinatorInput, signature: str
+    ) -> int:
+        count = 0
+        for record in reversed(inputs.ledger.records):
+            if record.failure_signature != signature:
+                break
+            if record.retry_type is RetryType.TRANSIENT_RETRY:
+                count += 1
+            else:
+                break
+        return count
 
     def _handle_quota_exhaustion(
         self,
         inputs: RecoveryCoordinatorInput,
         classification: FailureClassification,
         signature: str,
+        fingerprint: str,
+        eligible_candidates: tuple[RecoveryCandidate, ...],
     ) -> RecoveryDecision:
-        # If pinned target is quota-exhausted, do not silently bypass.
-        if inputs.pin is not None and self._is_pin_exhausted(inputs):
+        if inputs.pin is not None and self._is_pinned_capacity_exhausted(
+            inputs, eligible_candidates
+        ):
             return self._wait(
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 "PINNED_CAPACITY_UNAVAILABLE",
             )
 
-        candidate = self._select_eligible_candidate(inputs, exclude_exhausted=True)
+        candidate = self._select_eligible_candidate(inputs, eligible_candidates)
         if candidate is not None:
             return self._reroute(
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 candidate,
                 RecoveryAction.REROUTE_PROVIDER,
                 "alternate eligible capacity available",
@@ -314,6 +502,7 @@ class RecoveryCoordinator:
             inputs,
             classification,
             signature,
+            fingerprint,
             "no_eligible_capacity",
         )
 
@@ -322,20 +511,20 @@ class RecoveryCoordinator:
         inputs: RecoveryCoordinatorInput,
         classification: FailureClassification,
         signature: str,
+        fingerprint: str,
+        eligible_candidates: tuple[RecoveryCandidate, ...],
     ) -> RecoveryDecision:
-        # Try another credential/route/model only if already configured and eligible.
-        # Auth failures are credential/route-specific, so an alternate route on the
-        # same provider/failure domain is acceptable.
-        candidate = self._select_alternate_route_auth(inputs)
+        candidate = self._select_alternate_route_auth(inputs, eligible_candidates)
         if candidate is None:
-            candidate = self._select_different_provider_candidate(inputs)
+            candidate = self._select_different_provider_candidate(inputs, eligible_candidates)
         if candidate is None:
-            candidate = self._select_different_model_candidate(inputs)
+            candidate = self._select_different_model_candidate(inputs, eligible_candidates)
         if candidate is not None:
             return self._reroute(
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 candidate,
                 RecoveryAction.REROUTE_PROVIDER,
                 "alternate configured credential/route available",
@@ -345,6 +534,7 @@ class RecoveryCoordinator:
             inputs,
             classification,
             signature,
+            fingerprint,
             RecoveryAction.BLOCK,
             "auth failure: no alternate credential/route configured",
             attempt_counters=self._counters(inputs.ledger),
@@ -355,13 +545,16 @@ class RecoveryCoordinator:
         inputs: RecoveryCoordinatorInput,
         classification: FailureClassification,
         signature: str,
+        fingerprint: str,
+        eligible_candidates: tuple[RecoveryCandidate, ...],
     ) -> RecoveryDecision:
-        candidate = self._select_capable_candidate(inputs)
+        candidate = self._select_eligible_candidate(inputs, eligible_candidates)
         if candidate is not None:
             return self._reroute(
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 candidate,
                 RecoveryAction.REROUTE_MODEL,
                 "capable candidate available",
@@ -371,6 +564,7 @@ class RecoveryCoordinator:
             inputs,
             classification,
             signature,
+            fingerprint,
             RecoveryAction.BLOCK,
             "no capable candidate available",
             attempt_counters=self._counters(inputs.ledger),
@@ -381,15 +575,18 @@ class RecoveryCoordinator:
         inputs: RecoveryCoordinatorInput,
         classification: FailureClassification,
         signature: str,
+        fingerprint: str,
     ) -> RecoveryDecision:
         ledger = inputs.ledger
+        eligible, _ = evaluate_recovery_eligibility(inputs)
         if ledger.constrained_output_retry_count() >= inputs.policy.max_structured_output_retries:
-            candidate = self._select_different_model_candidate(inputs)
+            candidate = self._select_different_model_candidate(inputs, eligible)
             if candidate is not None:
                 return self._reroute(
                     inputs,
                     classification,
                     signature,
+                    fingerprint,
                     candidate,
                     RecoveryAction.REROUTE_MODEL,
                     "structured output retries exhausted: switch model",
@@ -398,6 +595,7 @@ class RecoveryCoordinator:
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 RecoveryAction.BLOCK,
                 "structured output retries exhausted: no alternative",
                 attempt_counters=self._counters(ledger),
@@ -407,8 +605,9 @@ class RecoveryCoordinator:
             action=RecoveryAction.CONSTRAINED_OUTPUT_RETRY,
             classification=classification,
             failure_signature=signature,
+            deterministic_input_fingerprint=fingerprint,
             retry_allowed=True,
-            selected_candidate=inputs.pin or self._current_candidate(inputs),
+            selected_candidate=self._current_candidate(inputs),
             require_reroute=False,
             require_context_rebuild=False,
             require_risk_escalation=False,
@@ -421,7 +620,6 @@ class RecoveryCoordinator:
                 "Structured output failed validation: bounded constrained retry "
                 "with explicit validation feedback."
             ),
-            deterministic_input_fingerprint=signature,
         )
 
     def _handle_planning_output_invalid(
@@ -429,15 +627,18 @@ class RecoveryCoordinator:
         inputs: RecoveryCoordinatorInput,
         classification: FailureClassification,
         signature: str,
+        fingerprint: str,
     ) -> RecoveryDecision:
         ledger = inputs.ledger
+        eligible, _ = evaluate_recovery_eligibility(inputs)
         if ledger.planning_retry_count() >= inputs.policy.max_planning_retries:
-            candidate = self._select_different_model_candidate(inputs)
+            candidate = self._select_different_model_candidate(inputs, eligible)
             if candidate is not None:
                 return self._reroute(
                     inputs,
                     classification,
                     signature,
+                    fingerprint,
                     candidate,
                     RecoveryAction.REROUTE_MODEL,
                     "planning retries exhausted: switch planner",
@@ -446,6 +647,7 @@ class RecoveryCoordinator:
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 RecoveryAction.BLOCK,
                 "planning retries exhausted: no alternative",
                 attempt_counters=self._counters(ledger),
@@ -455,8 +657,9 @@ class RecoveryCoordinator:
             action=RecoveryAction.REPLAN,
             classification=classification,
             failure_signature=signature,
+            deterministic_input_fingerprint=fingerprint,
             retry_allowed=True,
-            selected_candidate=inputs.pin or self._current_candidate(inputs),
+            selected_candidate=self._current_candidate(inputs),
             require_reroute=False,
             require_context_rebuild=False,
             require_risk_escalation=False,
@@ -469,7 +672,6 @@ class RecoveryCoordinator:
                 "Planning output failed deterministic validation: bounded replan "
                 "with preserved rejection evidence."
             ),
-            deterministic_input_fingerprint=signature,
         )
 
     def _handle_deterministic_implementation(
@@ -477,17 +679,20 @@ class RecoveryCoordinator:
         inputs: RecoveryCoordinatorInput,
         classification: FailureClassification,
         signature: str,
+        fingerprint: str,
     ) -> RecoveryDecision:
         ledger = inputs.ledger
+        eligible, _ = evaluate_recovery_eligibility(inputs)
         same_signature = ledger.signature_count(signature)
 
         if same_signature >= inputs.policy.require_cross_provider_after_same_signature:
-            candidate = self._select_cross_model_provider_candidate(inputs)
+            candidate = self._select_cross_model_provider_candidate(inputs, eligible)
             if candidate is not None:
                 return self._reroute(
                     inputs,
                     classification,
                     signature,
+                    fingerprint,
                     candidate,
                     RecoveryAction.CROSS_MODEL_REPAIR,
                     "repeated identical implementation signature: cross-model escalation",
@@ -496,6 +701,7 @@ class RecoveryCoordinator:
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 RecoveryAction.BLOCK,
                 "repeated implementation signature: no cross-model alternative",
                 require_risk_escalation=True,
@@ -503,12 +709,13 @@ class RecoveryCoordinator:
             )
 
         if ledger.repair_count() >= inputs.policy.max_same_model_repairs:
-            candidate = self._select_different_model_candidate(inputs)
+            candidate = self._select_different_model_candidate(inputs, eligible)
             if candidate is not None:
                 return self._reroute(
                     inputs,
                     classification,
                     signature,
+                    fingerprint,
                     candidate,
                     RecoveryAction.CROSS_MODEL_REPAIR,
                     "same-model repair budget exhausted",
@@ -517,6 +724,7 @@ class RecoveryCoordinator:
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 RecoveryAction.BLOCK,
                 "same-model repair budget exhausted: no alternative",
                 require_risk_escalation=True,
@@ -527,8 +735,9 @@ class RecoveryCoordinator:
             action=RecoveryAction.REPAIR_WITH_EVIDENCE,
             classification=classification,
             failure_signature=signature,
+            deterministic_input_fingerprint=fingerprint,
             retry_allowed=True,
-            selected_candidate=inputs.pin or self._current_candidate(inputs),
+            selected_candidate=self._current_candidate(inputs),
             require_reroute=False,
             require_context_rebuild=False,
             require_risk_escalation=False,
@@ -537,10 +746,7 @@ class RecoveryCoordinator:
             evidence_packet=self._implementation_evidence(inputs),
             attempt_counters=self._counters(ledger),
             terminal=False,
-            explanation=(
-                "Deterministic implementation failure: repair with actual validation evidence."
-            ),
-            deterministic_input_fingerprint=signature,
+            explanation="Deterministic implementation failure: repair with validation evidence.",
         )
 
     def _handle_conceptual_implementation(
@@ -548,13 +754,16 @@ class RecoveryCoordinator:
         inputs: RecoveryCoordinatorInput,
         classification: FailureClassification,
         signature: str,
+        fingerprint: str,
+        eligible_candidates: tuple[RecoveryCandidate, ...],
     ) -> RecoveryDecision:
-        candidate = self._select_cross_model_provider_candidate(inputs)
+        candidate = self._select_cross_model_provider_candidate(inputs, eligible_candidates)
         if candidate is not None:
             return self._reroute(
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 candidate,
                 RecoveryAction.CROSS_MODEL_REPAIR,
                 "conceptual failure: cross-model/provider escalation",
@@ -564,6 +773,7 @@ class RecoveryCoordinator:
             inputs,
             classification,
             signature,
+            fingerprint,
             RecoveryAction.BLOCK,
             "conceptual failure: no cross-model alternative",
             require_risk_escalation=True,
@@ -575,16 +785,33 @@ class RecoveryCoordinator:
         inputs: RecoveryCoordinatorInput,
         classification: FailureClassification,
         signature: str,
+        fingerprint: str,
     ) -> RecoveryDecision:
         ledger = inputs.ledger
+        eligible, _ = evaluate_recovery_eligibility(inputs)
+
+        meta = inputs.classifier_input.context_overflow
+        if meta is not None:
+            raw_required = meta.authority_required and meta.authority_items_raw == 0
+            if raw_required:
+                return self._terminal(
+                    inputs,
+                    classification,
+                    signature,
+                    fingerprint,
+                    RecoveryAction.BLOCK,
+                    "context overflow: required raw authority cannot be preserved",
+                    attempt_counters=self._counters(ledger),
+                )
+
         if ledger.context_rebuild_count() >= inputs.policy.max_context_rebuilds:
-            # Try larger-context model.
-            candidate = self._select_larger_context_candidate(inputs)
+            candidate = self._select_larger_context_candidate(inputs, eligible)
             if candidate is not None:
                 return self._reroute(
                     inputs,
                     classification,
                     signature,
+                    fingerprint,
                     candidate,
                     RecoveryAction.REROUTE_MODEL,
                     "context rebuild budget exhausted: choose larger-context model",
@@ -593,6 +820,7 @@ class RecoveryCoordinator:
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 RecoveryAction.BLOCK,
                 "context rebuild budget exhausted: authority cannot safely fit",
                 attempt_counters=self._counters(ledger),
@@ -602,8 +830,9 @@ class RecoveryCoordinator:
             action=RecoveryAction.REBUILD_CONTEXT,
             classification=classification,
             failure_signature=signature,
+            deterministic_input_fingerprint=fingerprint,
             retry_allowed=True,
-            selected_candidate=inputs.pin or self._current_candidate(inputs),
+            selected_candidate=self._select_current_or_first_eligible(inputs, eligible),
             require_reroute=False,
             require_context_rebuild=True,
             require_risk_escalation=False,
@@ -616,7 +845,6 @@ class RecoveryCoordinator:
                 "Context overflow: rebuild context using more compact strategy "
                 "while preserving required authority."
             ),
-            deterministic_input_fingerprint=signature,
         )
 
     def _handle_authority_violation(
@@ -624,15 +852,16 @@ class RecoveryCoordinator:
         inputs: RecoveryCoordinatorInput,
         classification: FailureClassification,
         signature: str,
+        fingerprint: str,
     ) -> RecoveryDecision:
-        ledger = inputs.ledger
-        # Do not immediately reuse same model for authority repair when safer alternative exists.
-        candidate = self._select_different_model_candidate(inputs)
+        eligible, _ = evaluate_recovery_eligibility(inputs)
+        candidate = self._select_different_model_candidate(inputs, eligible)
         if candidate is not None:
             return self._reroute(
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 candidate,
                 RecoveryAction.CROSS_MODEL_REPAIR,
                 "authority violation: require different model/provider for repair",
@@ -642,10 +871,11 @@ class RecoveryCoordinator:
             inputs,
             classification,
             signature,
+            fingerprint,
             RecoveryAction.BLOCK,
             "authority violation: no safe repair alternative",
             require_risk_escalation=True,
-            attempt_counters=self._counters(ledger),
+            attempt_counters=self._counters(inputs.ledger),
         )
 
     def _handle_unknown(
@@ -653,14 +883,16 @@ class RecoveryCoordinator:
         inputs: RecoveryCoordinatorInput,
         classification: FailureClassification,
         signature: str,
+        fingerprint: str,
     ) -> RecoveryDecision:
         if inputs.ledger.attempt_count < inputs.policy.max_total_attempts // 2:
             return RecoveryDecision(
                 action=RecoveryAction.RETRY_SAME_ROUTE,
                 classification=classification,
                 failure_signature=signature,
+                deterministic_input_fingerprint=fingerprint,
                 retry_allowed=True,
-                selected_candidate=inputs.pin or self._current_candidate(inputs),
+                selected_candidate=self._current_candidate(inputs),
                 require_reroute=False,
                 require_context_rebuild=False,
                 require_risk_escalation=False,
@@ -670,12 +902,12 @@ class RecoveryCoordinator:
                 attempt_counters=self._counters(inputs.ledger),
                 terminal=False,
                 explanation="Unknown failure: small bounded retry permitted by policy.",
-                deterministic_input_fingerprint=signature,
             )
         return self._terminal(
             inputs,
             classification,
             signature,
+            fingerprint,
             RecoveryAction.BLOCK,
             "unknown failure: bounded retry exhausted",
             attempt_counters=self._counters(inputs.ledger),
@@ -686,25 +918,29 @@ class RecoveryCoordinator:
         inputs: RecoveryCoordinatorInput,
         classification: FailureClassification,
         signature: str,
+        fingerprint: str,
+        eligible_candidates: tuple[RecoveryCandidate, ...],
         reason: str,
     ) -> RecoveryDecision:
-        candidate = self._select_eligible_candidate(inputs)
+        candidate = self._select_eligible_candidate(inputs, eligible_candidates)
         if candidate is not None:
             return self._reroute(
                 inputs,
                 classification,
                 signature,
+                fingerprint,
                 candidate,
                 RecoveryAction.REROUTE_PROVIDER,
                 f"{reason}: alternate eligible route available",
             )
-        return self._wait(inputs, classification, signature, f"{reason}: no alternate")
+        return self._wait(inputs, classification, signature, fingerprint, f"{reason}: no alternate")
 
     def _reroute(
         self,
         inputs: RecoveryCoordinatorInput,
         classification: FailureClassification,
         signature: str,
+        fingerprint: str,
         candidate: RecoveryCandidate,
         action: RecoveryAction,
         reason: str,
@@ -714,6 +950,7 @@ class RecoveryCoordinator:
             action=action,
             classification=classification,
             failure_signature=signature,
+            deterministic_input_fingerprint=fingerprint,
             retry_allowed=True,
             selected_candidate=candidate,
             require_reroute=True,
@@ -725,7 +962,6 @@ class RecoveryCoordinator:
             attempt_counters=self._counters(inputs.ledger),
             terminal=False,
             explanation=f"{reason}; model quality unaffected for infrastructure failures.",
-            deterministic_input_fingerprint=signature,
         )
 
     def _wait(
@@ -733,6 +969,7 @@ class RecoveryCoordinator:
         inputs: RecoveryCoordinatorInput,
         classification: FailureClassification,
         signature: str,
+        fingerprint: str,
         reason: str,
     ) -> RecoveryDecision:
         now = self._now()
@@ -750,6 +987,7 @@ class RecoveryCoordinator:
             action=RecoveryAction.WAIT_FOR_PROVIDER,
             classification=classification,
             failure_signature=signature,
+            deterministic_input_fingerprint=fingerprint,
             retry_allowed=False,
             selected_candidate=None,
             require_reroute=False,
@@ -761,7 +999,6 @@ class RecoveryCoordinator:
             attempt_counters=self._counters(inputs.ledger),
             terminal=False,
             explanation=f"No eligible alternative: enter WAITING_FOR_PROVIDER ({reason}).",
-            deterministic_input_fingerprint=signature,
         )
 
     def _terminal(
@@ -769,6 +1006,7 @@ class RecoveryCoordinator:
         inputs: RecoveryCoordinatorInput,
         classification: FailureClassification,
         signature: str,
+        fingerprint: str,
         action: RecoveryAction,
         reason: str,
         require_risk_escalation: bool = False,
@@ -778,6 +1016,7 @@ class RecoveryCoordinator:
             action=action,
             classification=classification,
             failure_signature=signature,
+            deterministic_input_fingerprint=fingerprint,
             retry_allowed=False,
             selected_candidate=None,
             require_reroute=False,
@@ -789,35 +1028,44 @@ class RecoveryCoordinator:
             attempt_counters=attempt_counters or self._counters(inputs.ledger),
             terminal=True,
             explanation=f"Terminal recovery state: {reason}.",
-            deterministic_input_fingerprint=signature,
         )
+
+    def _signature(self, inputs: RecoveryCoordinatorInput) -> str:
+        return self._classifier.classify(inputs.classifier_input).deterministic_fingerprint
 
     def _select_eligible_candidate(
         self,
         inputs: RecoveryCoordinatorInput,
-        exclude_exhausted: bool = False,
+        eligible_candidates: tuple[RecoveryCandidate, ...],
     ) -> RecoveryCandidate | None:
-        for candidate in self._ordered_candidates(inputs):
-            if not self._operationally_eligible(candidate, inputs):
+        signature = self._signature(inputs)
+        current = self._current_candidate(inputs)
+        for candidate in self._ordered_candidates_from(eligible_candidates):
+            if self._ledger_has_exhausted_path(signature, inputs.ledger, candidate):
                 continue
-            if exclude_exhausted and self._is_quota_exhausted(
-                candidate, inputs.quota_domain_states
+            if candidate == current and self._retry_path_exhausted_for_signature(
+                signature, inputs.ledger, candidate
             ):
                 continue
             if self._matches_pin(candidate, inputs.pin):
                 return candidate
         return None
 
-    def _select_alternate_route(self, inputs: RecoveryCoordinatorInput) -> RecoveryCandidate | None:
+    def _select_alternate_route(
+        self,
+        inputs: RecoveryCoordinatorInput,
+        eligible_candidates: tuple[RecoveryCandidate, ...],
+    ) -> RecoveryCandidate | None:
+        signature = self._signature(inputs)
         current = self._current_candidate(inputs)
-        for candidate in self._ordered_candidates(inputs):
+        for candidate in self._ordered_candidates_from(eligible_candidates):
             if candidate == current:
-                continue
-            if not self._operationally_eligible(candidate, inputs):
                 continue
             if candidate.route_id == current.route_id:
                 continue
             if candidate.failure_domain == current.failure_domain and current.failure_domain:
+                continue
+            if self._ledger_has_exhausted_path(signature, inputs.ledger, candidate):
                 continue
             if self._matches_pin(candidate, inputs.pin):
                 return candidate
@@ -826,14 +1074,16 @@ class RecoveryCoordinator:
     def _select_alternate_route_auth(
         self,
         inputs: RecoveryCoordinatorInput,
+        eligible_candidates: tuple[RecoveryCandidate, ...],
     ) -> RecoveryCandidate | None:
+        signature = self._signature(inputs)
         current = self._current_candidate(inputs)
-        for candidate in self._ordered_candidates(inputs):
+        for candidate in self._ordered_candidates_from(eligible_candidates):
             if candidate == current:
                 continue
-            if not self._operationally_eligible(candidate, inputs):
-                continue
             if candidate.route_id == current.route_id:
+                continue
+            if self._ledger_has_exhausted_path(signature, inputs.ledger, candidate):
                 continue
             if self._matches_pin(candidate, inputs.pin):
                 return candidate
@@ -842,14 +1092,16 @@ class RecoveryCoordinator:
     def _select_different_provider_candidate(
         self,
         inputs: RecoveryCoordinatorInput,
+        eligible_candidates: tuple[RecoveryCandidate, ...],
     ) -> RecoveryCandidate | None:
         if not self._provider_switch_allowed(inputs):
             return None
+        signature = self._signature(inputs)
         current = self._current_candidate(inputs)
-        for candidate in self._ordered_candidates(inputs):
+        for candidate in self._ordered_candidates_from(eligible_candidates):
             if candidate.provider_id == current.provider_id:
                 continue
-            if not self._operationally_eligible(candidate, inputs):
+            if self._ledger_has_exhausted_path(signature, inputs.ledger, candidate):
                 continue
             if self._matches_pin(candidate, inputs.pin):
                 return candidate
@@ -858,14 +1110,16 @@ class RecoveryCoordinator:
     def _select_different_model_candidate(
         self,
         inputs: RecoveryCoordinatorInput,
+        eligible_candidates: tuple[RecoveryCandidate, ...],
     ) -> RecoveryCandidate | None:
         if not self._model_switch_allowed(inputs):
             return None
+        signature = self._signature(inputs)
         current = self._current_candidate(inputs)
-        for candidate in self._ordered_candidates(inputs):
+        for candidate in self._ordered_candidates_from(eligible_candidates):
             if candidate.model_id == current.model_id:
                 continue
-            if not self._operationally_eligible(candidate, inputs):
+            if self._ledger_has_exhausted_path(signature, inputs.ledger, candidate):
                 continue
             if self._matches_pin(candidate, inputs.pin):
                 return candidate
@@ -874,16 +1128,18 @@ class RecoveryCoordinator:
     def _select_cross_provider_candidate(
         self,
         inputs: RecoveryCoordinatorInput,
+        eligible_candidates: tuple[RecoveryCandidate, ...],
     ) -> RecoveryCandidate | None:
         if not self._provider_switch_allowed(inputs):
             return None
+        signature = self._signature(inputs)
         current = self._current_candidate(inputs)
-        for candidate in self._ordered_candidates(inputs):
+        for candidate in self._ordered_candidates_from(eligible_candidates):
             if candidate.provider_id == current.provider_id:
                 continue
             if candidate.failure_domain == current.failure_domain and current.failure_domain:
                 continue
-            if not self._operationally_eligible(candidate, inputs):
+            if self._ledger_has_exhausted_path(signature, inputs.ledger, candidate):
                 continue
             if self._matches_pin(candidate, inputs.pin):
                 return candidate
@@ -892,33 +1148,19 @@ class RecoveryCoordinator:
     def _select_cross_model_provider_candidate(
         self,
         inputs: RecoveryCoordinatorInput,
+        eligible_candidates: tuple[RecoveryCandidate, ...],
     ) -> RecoveryCandidate | None:
         if not (self._provider_switch_allowed(inputs) and self._model_switch_allowed(inputs)):
             return None
+        signature = self._signature(inputs)
         current = self._current_candidate(inputs)
-        for candidate in self._ordered_candidates(inputs):
+        for candidate in self._ordered_candidates_from(eligible_candidates):
             if candidate.model_id == current.model_id:
                 continue
             if candidate.provider_id == current.provider_id:
                 continue
-            if not self._operationally_eligible(candidate, inputs):
+            if self._ledger_has_exhausted_path(signature, inputs.ledger, candidate):
                 continue
-            if self._matches_pin(candidate, inputs.pin):
-                return candidate
-        return None
-
-    def _select_capable_candidate(
-        self,
-        inputs: RecoveryCoordinatorInput,
-    ) -> RecoveryCandidate | None:
-        role = inputs.role
-        for candidate in self._ordered_candidates(inputs):
-            if not self._operationally_eligible(candidate, inputs):
-                continue
-            if role is not None:
-                req = CapabilityRequirement(required_roles=frozenset({role.value}))
-                if not match_capabilities(candidate.capabilities, req).eligible:
-                    continue
             if self._matches_pin(candidate, inputs.pin):
                 return candidate
         return None
@@ -926,84 +1168,53 @@ class RecoveryCoordinator:
     def _select_larger_context_candidate(
         self,
         inputs: RecoveryCoordinatorInput,
+        eligible_candidates: tuple[RecoveryCandidate, ...],
     ) -> RecoveryCandidate | None:
         if not self._model_switch_allowed(inputs):
             return None
+        required = _required_context_tokens(inputs)
+        if required is None:
+            return None
+        budget = ContextBudget(
+            primary_budget=required,
+            budget_type=BudgetType.TOKENS_ESTIMATE,
+            safety_margin_fraction=0.1,
+        )
         current = self._current_candidate(inputs)
-        current_tokens = current.capabilities.context_tokens or 0
-        for candidate in self._ordered_candidates(inputs):
+        for candidate in self._ordered_candidates_from(eligible_candidates):
             if candidate.model_id == current.model_id:
                 continue
-            tokens = candidate.capabilities.context_tokens or 0
-            if tokens <= current_tokens:
-                continue
-            if not self._operationally_eligible(candidate, inputs):
+            usable = compute_usable_budget(candidate.capabilities.context_tokens, budget).usable
+            if usable < required:
                 continue
             if self._matches_pin(candidate, inputs.pin):
                 return candidate
         return None
 
-    def _ordered_candidates(
+    def _select_current_or_first_eligible(
         self,
         inputs: RecoveryCoordinatorInput,
+        eligible_candidates: tuple[RecoveryCandidate, ...],
+    ) -> RecoveryCandidate | None:
+        current = self._current_candidate(inputs)
+        if current in eligible_candidates:
+            return current
+        ordered = self._ordered_candidates_from(eligible_candidates)
+        return ordered[0] if ordered else None
+
+    def _ordered_candidates_from(
+        self, candidates: tuple[RecoveryCandidate, ...]
     ) -> tuple[RecoveryCandidate, ...]:
-        # Deterministic ordering: provider_id, model_id, route_id.
-        return tuple(
-            sorted(
-                inputs.candidates,
-                key=lambda c: (c.provider_id, c.model_id, c.route_id),
-            )
-        )
+        return tuple(sorted(candidates, key=lambda c: (c.provider_id, c.model_id, c.route_id)))
 
-    def _operationally_eligible(
-        self,
-        candidate: RecoveryCandidate,
-        inputs: RecoveryCoordinatorInput,
-    ) -> bool:
-        if not candidate.recovery_state.is_eligible():
-            return False
-        return lifecycle_eligible(candidate.model_identity.lifecycle, inputs.current_risk)
-
-    def _provider_switch_allowed(self, inputs: RecoveryCoordinatorInput) -> bool:
-        return inputs.ledger.provider_switch_count() < inputs.policy.max_provider_switches
-
-    def _model_switch_allowed(self, inputs: RecoveryCoordinatorInput) -> bool:
-        return inputs.ledger.model_switch_count() < inputs.policy.max_model_switches
-
-    def _is_quota_exhausted(
-        self,
-        candidate: RecoveryCandidate,
-        domain_states: dict[str, ProviderQuotaState] | None,
-    ) -> bool:
-        quota = candidate.quota
-        if candidate.quota_domain and domain_states and candidate.quota_domain in domain_states:
-            quota = domain_states[candidate.quota_domain]
-        if quota is None:
-            return False
-        return quota.is_exhausted()
-
-    def _is_pin_exhausted(self, inputs: RecoveryCoordinatorInput) -> bool:
-        if inputs.pin is None:
-            return False
-        return self._is_quota_exhausted(inputs.pin, inputs.quota_domain_states)
-
-    def _matches_pin(
-        self,
-        candidate: RecoveryCandidate,
-        pin: RecoveryCandidate | None,
-    ) -> bool:
-        if pin is None:
-            return True
-        if pin.provider_id is not None and candidate.provider_id != pin.provider_id:
-            return False
-        if pin.model_id is not None and candidate.model_id != pin.model_id:
-            return False
-        return pin.route_id is None or candidate.route_id == pin.route_id
+    def _ordered_candidates(
+        self, inputs: RecoveryCoordinatorInput
+    ) -> tuple[RecoveryCandidate, ...]:
+        return self._ordered_candidates_from(inputs.candidates)
 
     def _current_candidate(self, inputs: RecoveryCoordinatorInput) -> RecoveryCandidate:
-        if inputs.pin is not None:
-            return inputs.pin
         classifier_input = inputs.classifier_input
+        pin = inputs.pin
         for candidate in inputs.candidates:
             provider_match = (
                 classifier_input.provider_id is None
@@ -1015,11 +1226,68 @@ class RecoveryCoordinator:
             route_match = (
                 classifier_input.route_id is None or candidate.route_id == classifier_input.route_id
             )
-            if provider_match and model_match and route_match:
+            pin_match = self._matches_pin(candidate, pin)
+            if provider_match and model_match and route_match and pin_match:
                 return candidate
         if inputs.candidates:
             return self._ordered_candidates(inputs)[0]
         raise ValueError("no current candidate available")
+
+    def _ledger_has_exhausted_path(
+        self,
+        signature: str,
+        ledger: RetryLedger,
+        candidate: RecoveryCandidate,
+    ) -> bool:
+        return ledger.is_exhausted_path(signature, candidate.provider_id, candidate.model_id)
+
+    def _retry_path_exhausted_for_signature(
+        self,
+        signature: str,
+        ledger: RetryLedger,
+        candidate: RecoveryCandidate,
+    ) -> bool:
+        return ledger.is_exhausted_path(signature, candidate.provider_id, candidate.model_id)
+
+    def _provider_switch_allowed(self, inputs: RecoveryCoordinatorInput) -> bool:
+        return inputs.ledger.provider_switch_count() < inputs.policy.max_provider_switches
+
+    def _model_switch_allowed(self, inputs: RecoveryCoordinatorInput) -> bool:
+        return inputs.ledger.model_switch_count() < inputs.policy.max_model_switches
+
+    def _is_pinned_capacity_exhausted(
+        self,
+        inputs: RecoveryCoordinatorInput,
+        eligible_candidates: tuple[RecoveryCandidate, ...],
+    ) -> bool:
+        pin = inputs.pin
+        if pin is None:
+            return False
+        for candidate in inputs.candidates:
+            if not self._matches_pin(candidate, pin):
+                continue
+            if candidate not in eligible_candidates:
+                return True
+            if candidate.quota is not None and candidate.quota.is_exhausted():
+                return True
+            if candidate.quota_domain and inputs.quota_domain_states:
+                domain_state = inputs.quota_domain_states.get(candidate.quota_domain)
+                if domain_state is not None and domain_state.is_exhausted():
+                    return True
+        return False
+
+    def _matches_pin(
+        self,
+        candidate: RecoveryCandidate,
+        pin: RoutingPin | None,
+    ) -> bool:
+        if pin is None:
+            return True
+        if pin.provider_id is not None and candidate.provider_id != pin.provider_id:
+            return False
+        if pin.model_id is not None and candidate.model_id != pin.model_id:
+            return False
+        return pin.route_id is None or candidate.route_id == pin.route_id
 
     def _structured_output_evidence(self, inputs: RecoveryCoordinatorInput) -> dict[str, Any]:
         validation = inputs.classifier_input.structured_output_validation
@@ -1058,8 +1326,13 @@ class RecoveryCoordinator:
         meta = inputs.classifier_input.context_overflow
         if meta is None:
             return {}
+        estimated_tokens = None
+        if meta.estimated_input_chars is not None:
+            estimated_tokens = estimate_tokens(meta.estimated_input_chars)
         return {
             "estimated_input_chars": meta.estimated_input_chars,
+            "estimated_input_tokens": estimated_tokens,
+            "required_context_tokens": _required_context_tokens(inputs),
             "model_context_tokens": meta.model_context_tokens,
             "authority_required": meta.authority_required,
             "authority_items_present": meta.authority_items_present,

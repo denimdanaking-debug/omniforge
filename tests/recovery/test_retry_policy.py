@@ -41,3 +41,15 @@ class TestFailureRecoveryPolicy:
         restored = FailureRecoveryPolicy.from_dict({"max_total_attempts": 7})
         assert restored.max_total_attempts == 7
         assert restored.max_transient_retries == 3
+
+    def test_from_dict_rejects_string_values(self) -> None:
+        with pytest.raises(ValueError, match="max_total_attempts must be an integer"):
+            FailureRecoveryPolicy.from_dict({"max_total_attempts": "10"})
+
+    def test_from_dict_rejects_float_values(self) -> None:
+        with pytest.raises(ValueError, match="max_transient_retries must be an integer"):
+            FailureRecoveryPolicy.from_dict({"max_transient_retries": 3.7})
+
+    def test_from_dict_rejects_bool_values(self) -> None:
+        with pytest.raises(ValueError, match="max_structured_output_retries must be an integer"):
+            FailureRecoveryPolicy.from_dict({"max_structured_output_retries": True})

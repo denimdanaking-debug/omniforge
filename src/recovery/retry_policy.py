@@ -59,20 +59,13 @@ class FailureRecoveryPolicy:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> FailureRecoveryPolicy:
-        return cls(
-            max_total_attempts=int(data.get("max_total_attempts", 10)),
-            max_same_signature_attempts=int(data.get("max_same_signature_attempts", 3)),
-            max_transient_retries=int(data.get("max_transient_retries", 3)),
-            max_structured_output_retries=int(data.get("max_structured_output_retries", 2)),
-            max_planning_retries=int(data.get("max_planning_retries", 2)),
-            max_same_model_repairs=int(data.get("max_same_model_repairs", 2)),
-            max_context_rebuilds=int(data.get("max_context_rebuilds", 2)),
-            max_provider_switches=int(data.get("max_provider_switches", 5)),
-            max_model_switches=int(data.get("max_model_switches", 5)),
-            max_consecutive_infrastructure_retries=int(
-                data.get("max_consecutive_infrastructure_retries", 3)
-            ),
-            require_cross_provider_after_same_signature=int(
-                data.get("require_cross_provider_after_same_signature", 2)
-            ),
-        )
+        expected = {f.name for f in cls.__dataclass_fields__.values()}
+        kwargs: dict[str, Any] = {}
+        for name in expected:
+            value = data.get(name)
+            if value is None:
+                value = cls.__dataclass_fields__[name].default
+            if type(value) is not int:
+                raise ValueError(f"{name} must be an integer, got {type(value).__name__}")
+            kwargs[name] = value
+        return cls(**kwargs)
