@@ -14,22 +14,24 @@ from src.security.redaction import contains_secret
 class ConfigurationVersioningTests(unittest.TestCase):
     def setUp(self) -> None:
         configuration._MIGRATIONS.clear()
-        # Re-register the production Phase 5 migration after clearing.
+        # Re-register the production Phase 5 and Phase 8 migrations after clearing.
         configuration.register_migration("1.0.0", "1.1.0")(configuration._migrate_1_0_0_to_1_1_0)
+        configuration.register_migration("1.1.0", "1.2.0")(configuration._migrate_1_1_0_to_1_2_0)
 
     def valid_config(self) -> dict:
         return {
-            "schema_version": "1.1.0",
+            "schema_version": "1.2.0",
             "routing_mode": "legacy",
             "exploration_enabled": False,
             "providers": {"openai": {"enabled": True, "models": {}, "routes": {}}},
             "pins": {},
             "project_policies": {},
+            "router_config": {},
         }
 
     def test_current_version_is_accepted(self) -> None:
         result = configuration.validate_config(self.valid_config())
-        self.assertEqual("1.1.0", result["schema_version"])
+        self.assertEqual("1.2.0", result["schema_version"])
 
     def test_legacy_config_migrates_to_current_version(self) -> None:
         legacy = {
@@ -39,11 +41,12 @@ class ConfigurationVersioningTests(unittest.TestCase):
             "providers": {"openai": {"enabled": True}},
         }
         result = configuration.validate_config(legacy)
-        self.assertEqual("1.1.0", result["schema_version"])
+        self.assertEqual("1.2.0", result["schema_version"])
         self.assertIn("models", result["providers"]["openai"])
         self.assertIn("routes", result["providers"]["openai"])
         self.assertIn("pins", result)
         self.assertIn("project_policies", result)
+        self.assertIn("router_config", result)
 
     def test_missing_version_fails_closed(self) -> None:
         config = self.valid_config()
@@ -67,7 +70,7 @@ class ConfigurationVersioningTests(unittest.TestCase):
         original = {"schema_version": "0.9.0"}
         result = configuration.validate_config(original)
         self.assertEqual({"schema_version": "0.9.0"}, original)
-        self.assertEqual("1.1.0", result["schema_version"])
+        self.assertEqual("1.2.0", result["schema_version"])
         self.assertEqual("legacy", result["routing_mode"])
 
     def test_migration_cycle_fails_closed(self) -> None:
@@ -308,7 +311,7 @@ SENTINEL = "OMNIFORGE_TEST_SECRET_SENTINEL_config_3"
 
 def test_runtime_state_save_contains_no_credential_sentinel() -> None:
     config = {
-        "schema_version": "1.1.0",
+        "schema_version": "1.2.0",
         "routing_mode": "legacy",
         "exploration_enabled": False,
         "providers": {
@@ -329,6 +332,7 @@ def test_runtime_state_save_contains_no_credential_sentinel() -> None:
                 "routing_mode_override": "legacy",
             }
         },
+        "router_config": {},
     }
     state = configuration.extract_administrative_state(config)
     state["run_id"] = "run-test"
@@ -346,12 +350,13 @@ def test_runtime_state_save_contains_no_credential_sentinel() -> None:
 def test_sensitive_key_variants_are_rejected_in_config() -> None:
     for key in ["api-key", "apikey", "API_KEY", "secret-key", "access-token"]:
         config = {
-            "schema_version": "1.1.0",
+            "schema_version": "1.2.0",
             "routing_mode": "legacy",
             "exploration_enabled": False,
             "providers": {"openai": {"enabled": True, key: SENTINEL}},
             "pins": {},
             "project_policies": {},
+            "router_config": {},
         }
         with pytest.raises(configuration.RawSecretInConfigurationError):
             configuration.validate_config(config)
