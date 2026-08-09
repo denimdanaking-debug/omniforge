@@ -11,7 +11,7 @@ from typing import Any
 from src.routing.policy import ProjectRoutingPolicy, RoutingPin
 from src.security.redaction import SENSITIVE_STRUCTURED_KEYS, _normalize_key
 
-CURRENT_CONFIG_SCHEMA_VERSION = "1.2.0"
+CURRENT_CONFIG_SCHEMA_VERSION = "1.3.0"
 SUPPORTED_CONFIG_SCHEMA_VERSIONS = frozenset({CURRENT_CONFIG_SCHEMA_VERSION})
 
 Migration = Callable[[dict[str, Any]], dict[str, Any]]
@@ -79,6 +79,23 @@ def _migrate_1_1_0_to_1_2_0(old: dict[str, Any]) -> dict[str, Any]:
     router_config.setdefault("emergency_fallback_orders", {})
     router_config.setdefault("cost_metadata", {})
     router_config.setdefault("default_safety_margin_fraction", 0.1)
+    router_config.setdefault("exploration_enabled", False)
+    return working
+
+
+@register_migration("1.2.0", "1.3.0")
+def _migrate_1_2_0_to_1_3_0(old: dict[str, Any]) -> dict[str, Any]:
+    """Add Phase 9 risk policy with safe defaults; preserve all prior settings."""
+    working = copy.deepcopy(old)
+    working.setdefault("routing_mode", "legacy")
+    working.setdefault("exploration_enabled", False)
+    working.setdefault("dynamic_routing_enabled", False)
+    working.setdefault("risk_policy", {})
+    project_policies = working.setdefault("project_policies", {})
+    for policy in project_policies.values():
+        if isinstance(policy, dict):
+            policy.setdefault("risk_policy", {})
+    router_config = working.setdefault("router_config", {})
     router_config.setdefault("exploration_enabled", False)
     return working
 
@@ -214,12 +231,25 @@ def _validate_pin(path: str, value: Any) -> RoutingPin:
 
 
 def _validate_project_policy(path: str, value: Any) -> ProjectRoutingPolicy:
+    from src.risk.project_policy import ProjectRiskPolicy
+
     if not isinstance(value, dict):
         raise InvalidConfiguration(f"project policy at {path} must be an object")
     try:
-        return ProjectRoutingPolicy.from_dict(value)
+        _ = ProjectRoutingPolicy.from_dict(value)
     except ValueError as exc:
         raise InvalidConfiguration(f"project policy at {path} is invalid: {exc}") from exc
+
+    risk_policy_raw = value.get("risk_policy", {})
+    try:
+        risk_policy = ProjectRiskPolicy.from_dict(risk_policy_raw)
+    except ValueError as exc:
+        raise InvalidConfiguration(f"{path}.risk_policy is invalid: {exc}") from exc
+
+    value["risk_policy"] = risk_policy.to_dict()
+    # Re-create the routing policy from the normalized dict so that its own
+    # serialized form reflects the validated risk policy.
+    return ProjectRoutingPolicy.from_dict(value)
 
 
 def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -312,6 +342,9 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
     router_config = working.get("router_config", {})
     _validate_router_config("router_config", router_config)
 
+    risk_policy = working.get("risk_policy", {})
+    _validate_risk_policy("risk_policy", risk_policy)
+
     return working
 
 
@@ -323,6 +356,17 @@ def _validate_router_config(path: str, value: Any) -> None:
     try:
         RouterConfig.from_dict(value)
     except (RouterConfigError, ValueError) as exc:
+        raise InvalidConfiguration(f"{path} is invalid: {exc}") from exc
+
+
+def _validate_risk_policy(path: str, value: Any) -> None:
+    from src.risk.project_policy import ProjectRiskPolicy
+
+    if not isinstance(value, dict):
+        raise InvalidConfiguration(f"{path} must be an object")
+    try:
+        ProjectRiskPolicy.from_dict(value)
+    except ValueError as exc:
         raise InvalidConfiguration(f"{path} is invalid: {exc}") from exc
 
 
@@ -365,6 +409,7 @@ def extract_administrative_state(config: Mapping[str, Any]) -> dict[str, Any]:
         "model_status": model_status,
         "route_status": route_status,
         "routing_mode": working.get("routing_mode", "legacy"),
+        "dynamic_routing_enabled": working.get("dynamic_routing_enabled", False),
         "exploration_enabled": working.get("exploration_enabled", False),
         "pins": working.get("pins", {}),
         "project_policies": copy.deepcopy(working.get("project_policies", {})),

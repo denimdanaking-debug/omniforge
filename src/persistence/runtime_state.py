@@ -17,7 +17,7 @@ from src.routing.roles import ExecutionRole
 from src.security.redaction import redact
 from src.security.secrets import SecretValue
 
-CURRENT_RUNTIME_STATE_VERSION = "1.2.0"
+CURRENT_RUNTIME_STATE_VERSION = "1.3.0"
 RuntimeMigration = Callable[[dict[str, Any]], dict[str, Any]]
 _RUNTIME_MIGRATIONS: dict[str, tuple[str, RuntimeMigration]] = {}
 
@@ -105,6 +105,14 @@ def _migrate_runtime_1_1_0_to_1_2_0(old: dict[str, Any]) -> dict[str, Any]:
     working.setdefault("failure_domain_index", {})
     working.setdefault("recovery_scheduler", {})
     working.setdefault("waiting_tasks", {})
+    return working
+
+
+@register_runtime_migration("1.2.0", "1.3.0")
+def _migrate_runtime_1_2_0_to_1_3_0(old: dict[str, Any]) -> dict[str, Any]:
+    """Add Phase 9 risk engine task state with safe defaults."""
+    working = copy.deepcopy(old)
+    working.setdefault("task_risk_state", {})
     return working
 
 
