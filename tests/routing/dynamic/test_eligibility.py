@@ -351,3 +351,33 @@ def test_multiple_exclusions_recorded() -> None:
     result = pipeline.evaluate(_request(), (c1, c2))
     assert len(result.candidates) == 0
     assert len(result.exclusions) == 2
+
+
+def test_unknown_provider_health_remains_eligible() -> None:
+    """An unobserved provider operational state must not be treated as unhealthy."""
+    candidate = _candidate()
+    candidate_without_health = RoutingCandidate(
+        provider_id=candidate.provider_id,
+        model_id=candidate.model_id,
+        route_id=candidate.route_id,
+        model_identity=candidate.model_identity,
+        route_identity=candidate.route_identity,
+        capabilities=candidate.capabilities,
+        operational_state=None,
+    )
+    engine = _engine()
+    pipeline = CandidateEligibilityPipeline(engine)
+    result = pipeline.evaluate(_request(), (candidate_without_health,))
+    assert len(result.candidates) == 1
+    assert candidate_without_health in result.candidates
+
+
+def test_rate_limited_route_excluded() -> None:
+    """A route actively reporting RATE_LIMITED cannot dispatch."""
+    candidate = _candidate(route_health=RouteHealth.RATE_LIMITED)
+    engine = _engine()
+    pipeline = CandidateEligibilityPipeline(engine)
+    result = pipeline.evaluate(_request(), (candidate,))
+    assert len(result.candidates) == 0
+    assert any(e.reason == ExclusionReason.ROUTE_UNHEALTHY for e in result.exclusions)
+    assert any("rate_limited" in e.detail for e in result.exclusions)

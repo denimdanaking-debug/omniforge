@@ -96,7 +96,8 @@ def test_risk_fit_lifecycle_scale() -> None:
     assert risk_factor.normalized_value < 1.0
 
 
-def test_empirical_reliability_overrides_prior() -> None:
+def test_empirical_reliability_is_pure_observed_rate() -> None:
+    """empirical_reliability must be the observed success rate, not blended with priors."""
     from src.routing.capabilities import ModelCapabilities
     from src.routing.inference_route import InferenceRouteIdentity, RouteType
 
@@ -125,10 +126,50 @@ def test_empirical_reliability_overrides_prior() -> None:
     scorer = DeterministicRouterScorer()
     score = scorer.score(_request(), candidate)
     rel_factor = next(wf for wf in score.weighted_factors if wf.name == "empirical_reliability")
+    assert rel_factor.normalized_value == 0.5
+
+    # expected_success remains the forward-looking blended prediction.
+    exp_factor = next(wf for wf in score.weighted_factors if wf.name == "expected_success")
     # Prior for kimi coding is 0.78; blended with 0.5 empirical at 100 attempts
-    # should move toward 0.5.
-    assert rel_factor.normalized_value < 0.78
-    assert rel_factor.normalized_value > 0.5
+    # should move toward 0.5 but stay above it.
+    assert exp_factor.normalized_value < 0.78
+    assert exp_factor.normalized_value > 0.5
+
+
+def test_expected_success_differs_from_empirical_reliability_for_cold_start() -> None:
+    """Cold-start candidate gets prior-based expected success despite no empirical evidence."""
+    from src.routing.capabilities import ModelCapabilities
+    from src.routing.inference_route import InferenceRouteIdentity, RouteType
+
+    model = ModelIdentity(
+        model_id="openai-model", family="openai", lifecycle=ModelLifecycle.HIGH_RISK
+    )
+    route = InferenceRouteIdentity(
+        route_id="rt",
+        provider_id="pv",
+        route_type=RouteType.DIRECT,
+        endpoint_key="e",
+        failure_domain="f",
+    )
+    caps = ModelCapabilities(
+        context_tokens=10_000, supported_roles=frozenset({ExecutionRole.CODING.value})
+    )
+    candidate = RoutingCandidate(
+        provider_id="pv",
+        model_id="openai-model",
+        route_id="rt",
+        model_identity=model,
+        route_identity=route,
+        capabilities=caps,
+        operational_state=ProviderOperationalState(health=ProviderHealth.HEALTHY),
+    )
+    scorer = DeterministicRouterScorer()
+    score = scorer.score(_request(), candidate)
+    rel_factor = next(wf for wf in score.weighted_factors if wf.name == "empirical_reliability")
+    exp_factor = next(wf for wf in score.weighted_factors if wf.name == "expected_success")
+    # Cold start: empirical reliability is neutral; expected success uses seeded prior.
+    assert rel_factor.normalized_value == 0.5
+    assert exp_factor.normalized_value > 0.5
 
 
 def test_no_brand_privilege_across_models() -> None:
@@ -211,3 +252,116 @@ def test_diversity_reserve_penalty_increases_with_concentration(
     score = scorer.score(_request(), healthy_candidate, state)
     div_factor = next(wf for wf in score.weighted_factors if wf.name == "diversity_reserve")
     assert div_factor.normalized_value < 0.0
+
+
+# ---------------------------------------------------------------------------
+# Cost-to-accepted scoring integration
+# ---------------------------------------------------------------------------
+
+
+def test_cost_factor_uses_expected_total_not_direct_cost(
+    cheap_unreliable_candidate: RoutingCandidate,
+    expensive_reliable_candidate: RoutingCandidate,
+) -> None:
+    """Cheap failure-prone model loses when expected total accepted-task cost is higher."""
+    request = DynamicRoutingRequest(
+        task_id="t1",
+        project_id="p1",
+        role=ExecutionRole.CODING,
+        risk=RiskLevel.R2_NORMAL,
+        task_class="default",
+        expected_input_tokens=1000,
+        expected_output_tokens=500,
+    )
+    scorer = DeterministicRouterScorer(
+        weights=ScoringWeights(
+            **dict.fromkeys(ScoringWeights.__dataclass_fields__, 0.0) | {"cost": 1.0}
+        )
+    )
+    cheap_score = scorer.score(request, cheap_unreliable_candidate)
+    reliable_score = scorer.score(request, expensive_reliable_candidate)
+
+    cheap_cost = cheap_score.cost_estimate
+    reliable_cost = reliable_score.cost_estimate
+    assert cheap_cost is not None
+    assert reliable_cost is not None
+    assert cheap_cost.expected_total is not None
+    assert reliable_cost.expected_total is not None
+    # The failure-prone model's expected accepted-task cost is higher.
+    assert cheap_cost.expected_total > reliable_cost.expected_total
+    # Therefore the reliable model scores higher on the cost factor.
+    cheap_factor = next(wf for wf in cheap_score.weighted_factors if wf.name == "cost")
+    reliable_factor = next(wf for wf in reliable_score.weighted_factors if wf.name == "cost")
+    assert reliable_factor.normalized_value > cheap_factor.normalized_value
+
+
+def test_unknown_pricing_not_free_in_scoring(healthy_candidate: RoutingCandidate) -> None:
+    """A candidate with unknown pricing receives a neutral cost score, not a free-lunch score."""
+    from src.routing.capabilities import CostMetadata, ModelCapabilities
+
+    caps = ModelCapabilities(
+        context_tokens=healthy_candidate.capabilities.context_tokens,
+        supported_roles=healthy_candidate.capabilities.supported_roles,
+        cost=CostMetadata(),
+    )
+    candidate = RoutingCandidate(
+        provider_id=healthy_candidate.provider_id,
+        model_id=healthy_candidate.model_id,
+        route_id=healthy_candidate.route_id,
+        model_identity=healthy_candidate.model_identity,
+        route_identity=healthy_candidate.route_identity,
+        capabilities=caps,
+        route_cost_state=None,
+    )
+    request = DynamicRoutingRequest(
+        task_id="t1",
+        project_id="p1",
+        role=ExecutionRole.CODING,
+        risk=RiskLevel.R2_NORMAL,
+        task_class="default",
+        expected_input_tokens=1000,
+        expected_output_tokens=500,
+    )
+    scorer = DeterministicRouterScorer()
+    score = scorer.score(request, candidate)
+    cost_factor = next(wf for wf in score.weighted_factors if wf.name == "cost")
+    assert cost_factor.normalized_value == 0.5
+    assert score.cost_estimate is not None
+    assert score.cost_estimate.expected_total is None
+
+
+# ---------------------------------------------------------------------------
+# Health semantics
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_provider_health_is_neutral_not_healthy() -> None:
+    """A candidate with no operational state remains eligible but scores neutrally on health."""
+    from src.routing.capabilities import ModelCapabilities
+    from src.routing.inference_route import InferenceRouteIdentity, RouteType
+
+    model = ModelIdentity(model_id="mystery", family="mystery", lifecycle=ModelLifecycle.HIGH_RISK)
+    route = InferenceRouteIdentity(
+        route_id="rt",
+        provider_id="pv",
+        route_type=RouteType.DIRECT,
+        endpoint_key="e",
+        failure_domain="f",
+    )
+    caps = ModelCapabilities(
+        context_tokens=10_000, supported_roles=frozenset({ExecutionRole.CODING.value})
+    )
+    candidate = RoutingCandidate(
+        provider_id="pv",
+        model_id="mystery",
+        route_id="rt",
+        model_identity=model,
+        route_identity=route,
+        capabilities=caps,
+        operational_state=None,
+    )
+    scorer = DeterministicRouterScorer()
+    score = scorer.score(_request(), candidate)
+    health_factor = next(wf for wf in score.weighted_factors if wf.name == "provider_health")
+    assert health_factor.normalized_value == 0.5
+    assert "unknown" in health_factor.provenance.lower()

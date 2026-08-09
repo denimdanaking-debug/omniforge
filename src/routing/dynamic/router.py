@@ -13,32 +13,29 @@ from src.recovery.reserve import ReserveCapacityPolicy
 from src.routing.policy import ProjectRoutingPolicy, RoutingPolicyEngine
 
 from .candidate import RoutingCandidate
-from .config import RouterConfig, load_router_config
+from .config import RouterConfig, RoutingCoordinatorState, load_router_config
 from .decision import RoutingDecision, RoutingDecisionRecord
 from .eligibility import CandidateEligibilityPipeline
 from .explanation import ExplanationFormatter
-from .fallback import EmergencyFallbackRouter
-from .fingerprint import input_fingerprint
+from .fingerprint import routing_input_fingerprint
 from .request import DynamicRoutingRequest
-from .scoring import CandidateScore, DeterministicRouterScorer, ScoringState
+from .scoring import CandidateScore, ScoringState
 
 
 class RoutingCoordinator:
     """Coordinate legacy and dynamic routing decisions."""
 
     def __init__(self, config: RouterConfig | None = None) -> None:
-        self._config = config or RouterConfig()
-        self._scorer = DeterministicRouterScorer(
-            weights=self._config.factor_weights,
-            blender=self._config.prior_blender,
-        )
-        self._fallback_router = EmergencyFallbackRouter(
-            fallback_orders=self._config.emergency_fallback_orders
-        )
+        self._default_config = config or RouterConfig()
+        self._state = RoutingCoordinatorState()
 
     @property
     def config(self) -> RouterConfig:
-        return self._config
+        return self._default_config
+
+    @property
+    def state(self) -> RoutingCoordinatorState:
+        return self._state
 
     def _make_policy_engine(
         self,
@@ -89,6 +86,7 @@ class RoutingCoordinator:
         request: DynamicRoutingRequest,
         candidates: tuple[RoutingCandidate, ...],
         admin_state: dict[str, Any],
+        router_cfg: RouterConfig,
         context: dict[str, Any] | None,
         timestamp: datetime,
         exploration_enabled: bool,
@@ -119,7 +117,13 @@ class RoutingCoordinator:
             fallback_used=False,
             fallback_reason=None,
             context_metadata=context or {},
-            input_fingerprint=input_fingerprint(request),
+            input_fingerprint=routing_input_fingerprint(
+                request=request,
+                candidates=candidates,
+                policy_engine=policy_engine,
+                router_config=router_cfg,
+                scoring_state=self._state,
+            ),
             timestamp=timestamp,
         )
         decision = RoutingDecision(
@@ -147,18 +151,22 @@ class RoutingCoordinator:
         request: DynamicRoutingRequest,
         candidates: tuple[RoutingCandidate, ...],
         admin_state: dict[str, Any],
+        router_cfg: RouterConfig,
         context: dict[str, Any] | None,
         timestamp: datetime,
         exploration_enabled: bool,
     ) -> RoutingDecision:
         """Dynamic mode: eligibility -> score -> select winner -> record."""
         policy_engine = self._make_policy_engine(request, admin_state)
-        context_budget = self._config.context_budget_for(request)
+        context_budget = router_cfg.context_budget_for(request)
         pipeline = self._make_pipeline(policy_engine, admin_state, context_budget)
         eligibility = pipeline.evaluate(request, candidates)
 
+        scorer = router_cfg.build_scorer()
+        fallback_router = router_cfg.build_fallback_router()
+
         if not eligibility.candidates:
-            return self._fallback_router.route(
+            return fallback_router.route(
                 request=request,
                 candidates=candidates,
                 pipeline=pipeline,
@@ -168,17 +176,17 @@ class RoutingCoordinator:
             )
 
         scoring_state = ScoringState(
-            last_selected_key=self._config.state.last_selected_key,
-            failure_domain_counts=dict(self._config.state.failure_domain_counts),
+            last_selected_key=self._state.last_selected_key,
+            failure_domain_counts=dict(self._state.failure_domain_counts),
         )
 
         try:
             scored: list[tuple[RoutingCandidate, CandidateScore]] = []
             for candidate in eligibility.candidates:
-                score = self._scorer.score(request, candidate, scoring_state)
+                score = scorer.score(request, candidate, scoring_state)
                 scored.append((candidate, score))
         except Exception as exc:
-            return self._fallback_router.route(
+            return fallback_router.route(
                 request=request,
                 candidates=candidates,
                 pipeline=pipeline,
@@ -200,10 +208,10 @@ class RoutingCoordinator:
 
         # Update local scoring state for future continuity/diversity.
         domain = winner.route_identity.failure_domain
-        self._config.state.failure_domain_counts[domain] = (
-            self._config.state.failure_domain_counts.get(domain, 0) + 1
+        self._state.failure_domain_counts[domain] = (
+            self._state.failure_domain_counts.get(domain, 0) + 1
         )
-        self._config.state.last_selected_key = winner.identity_key
+        self._state.last_selected_key = winner.identity_key
 
         record = RoutingDecisionRecord(
             decision_id=f"decision-{uuid.uuid4()}",
@@ -224,7 +232,13 @@ class RoutingCoordinator:
             fallback_used=False,
             fallback_reason=None,
             context_metadata=context or {},
-            input_fingerprint=input_fingerprint(request),
+            input_fingerprint=routing_input_fingerprint(
+                request=request,
+                candidates=candidates,
+                policy_engine=policy_engine,
+                router_config=router_cfg,
+                scoring_state=self._state,
+            ),
             timestamp=timestamp,
         )
         decision = RoutingDecision(
@@ -279,8 +293,14 @@ class RoutingCoordinator:
 
         if routing_mode == "legacy":
             return self._route_legacy(
-                request, candidates, admin_state, context, timestamp, exploration_enabled
+                request,
+                candidates,
+                admin_state,
+                router_cfg,
+                context,
+                timestamp,
+                exploration_enabled,
             )
         return self._route_dynamic(
-            request, candidates, admin_state, context, timestamp, exploration_enabled
+            request, candidates, admin_state, router_cfg, context, timestamp, exploration_enabled
         )

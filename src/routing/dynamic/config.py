@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.context.budget import BudgetType, ContextBudget
 from src.routing.roles import ExecutionRole
@@ -13,17 +13,21 @@ from .priors import PriorBlender
 from .request import DynamicRoutingRequest
 from .scoring import ScoringWeights
 
-
-@dataclass
-class RoutingCoordinatorState:
-    """Mutable routing state container."""
-
-    last_selected_key: str | None = None
-    failure_domain_counts: dict[str, int] = field(default_factory=dict)
+if TYPE_CHECKING:
+    from .fallback import EmergencyFallbackRouter
+    from .scoring import DeterministicRouterScorer
 
 
 class RouterConfigError(ValueError):
     """Raised when router configuration is invalid."""
+
+
+@dataclass
+class RoutingCoordinatorState:
+    """Mutable routing continuity/diversity state."""
+
+    last_selected_key: str | None = None
+    failure_domain_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -36,7 +40,6 @@ class RouterConfig:
     cost_metadata: dict[str, Any] = field(default_factory=dict)
     default_safety_margin_fraction: float = 0.1
     exploration_enabled: bool = False
-    state: RoutingCoordinatorState = field(default_factory=RoutingCoordinatorState)
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.default_safety_margin_fraction <= 1.0:
@@ -85,6 +88,22 @@ class RouterConfig:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RouterConfig:
         return load_router_config(data)
+
+    def build_scorer(self) -> "DeterministicRouterScorer":  # noqa: UP037
+        """Create a scorer driven by this configuration."""
+        from .scoring import DeterministicRouterScorer
+
+        return DeterministicRouterScorer(
+            weights=self.factor_weights,
+            blender=self.prior_blender,
+            cost_metadata=self.cost_metadata,
+        )
+
+    def build_fallback_router(self) -> "EmergencyFallbackRouter":  # noqa: UP037
+        """Create a fallback router driven by this configuration."""
+        from .fallback import EmergencyFallbackRouter
+
+        return EmergencyFallbackRouter(fallback_orders=self.emergency_fallback_orders)
 
 
 def _validate_weights(data: dict[str, Any]) -> None:

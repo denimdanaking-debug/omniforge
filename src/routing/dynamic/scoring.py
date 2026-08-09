@@ -11,6 +11,7 @@ from src.providers.identity import ProviderHealth
 from src.recovery.quota_balance import QuotaPressure
 
 from .candidate import RoutingCandidate
+from .cost import CostToAcceptedEstimate, estimate_cost_to_accepted
 from .priors import PriorBlender
 from .request import DynamicRoutingRequest
 
@@ -55,6 +56,7 @@ class CandidateScore:
     total_score: float
     weighted_factors: tuple[WeightedFactor, ...]
     tie_break_key: str
+    cost_estimate: CostToAcceptedEstimate | None = None
 
 
 @dataclass(frozen=True)
@@ -103,14 +105,22 @@ class DeterministicRouterScorer:
     """Deterministic, weighted-factor scorer for routing candidates."""
 
     def __init__(
-        self, weights: ScoringWeights | None = None, blender: PriorBlender | None = None
+        self,
+        weights: ScoringWeights | None = None,
+        blender: PriorBlender | None = None,
+        cost_metadata: dict[str, Any] | None = None,
     ) -> None:
         self._weights = weights or ScoringWeights()
         self._blender = blender or PriorBlender()
+        self._cost_metadata = cost_metadata or {}
 
     @property
     def weights(self) -> ScoringWeights:
         return self._weights
+
+    @property
+    def cost_metadata(self) -> dict[str, Any]:
+        return self._cost_metadata
 
     _SIGNED_FACTORS: frozenset[str] = frozenset({"diversity_reserve"})
 
@@ -150,24 +160,20 @@ class DeterministicRouterScorer:
         value = rank.get(lifecycle.value, 0) / 3.0
         return value, f"lifecycle {lifecycle.value} below requirement for {request.risk.name}"
 
-    def _empirical_reliability(
-        self, candidate: RoutingCandidate, request: DynamicRoutingRequest
-    ) -> tuple[float, str]:
+    def _empirical_reliability(self, candidate: RoutingCandidate) -> tuple[float, str]:
+        """Pure observed historical reliability.
+
+        This factor intentionally does NOT blend priors. It reflects only the
+        evidence recorded for this model. A cold-start candidate with no evidence
+        receives a neutral conservative value so it does not dominate nor vanish.
+        """
         evidence = candidate.performance_evidence
-        prior = self._blender.prior_for(
-            model_id=candidate.model_id,
-            role=request.role,
-            task_class=request.task_class,
+        if evidence is None or evidence.success_rate is None:
+            return 0.5, "no empirical evidence"
+        return (
+            evidence.success_rate,
+            f"observed_success_rate={evidence.success_rate:.3f}, attempts={evidence.attempts}",
         )
-        empirical = evidence.success_rate if evidence is not None else None
-        count = evidence.attempts if evidence is not None else 0
-        blended = self._blender.blend(prior, empirical, count)
-        provenance = (
-            f"prior={prior:.3f}, empirical={empirical}, attempts={count}"
-            if empirical is not None
-            else f"prior={prior:.3f}, no empirical evidence"
-        )
-        return blended, provenance
 
     def _context_suitability(
         self, candidate: RoutingCandidate, request: DynamicRoutingRequest
@@ -222,23 +228,26 @@ class DeterministicRouterScorer:
 
     def _cost(
         self, candidate: RoutingCandidate, request: DynamicRoutingRequest
-    ) -> tuple[float, str]:
-        route_state = candidate.route_cost_state
-        input_cost = route_state.input_cost_per_million if route_state else None
-        output_cost = route_state.output_cost_per_million if route_state else None
-        caps = candidate.capabilities.cost
-        if input_cost is None:
-            input_cost = caps.input_per_million
-        if output_cost is None:
-            output_cost = caps.output_per_million
-        if input_cost is None or output_cost is None:
-            return 0.5, "cost unknown"
-        input_tokens = request.expected_input_tokens or 1000
-        output_tokens = request.expected_output_tokens or 500
-        total = (input_tokens * input_cost + output_tokens * output_cost) / 1_000_000
-        # Normalize inverse: cheaper is better. Clamp to avoid div-zero.
-        score = 1.0 / (1.0 + total)
-        return self._normalize(score, "cost"), f"estimated_total_cost={total:.6f}"
+    ) -> tuple[float, str, CostToAcceptedEstimate]:
+        """Cost factor based on expected total cost to accepted integration.
+
+        Uses ``estimate_cost_to_accepted`` so cheap but failure-prone models do
+        not automatically win over more reliable alternatives.
+        """
+        estimate = estimate_cost_to_accepted(
+            request,
+            candidate,
+            **self._cost_metadata,
+        )
+        if estimate.expected_total is None:
+            return 0.5, "cost unknown", estimate
+        # Normalize inverse: lower expected accepted-task cost is better.
+        score = 1.0 / (1.0 + estimate.expected_total)
+        return (
+            self._normalize(score, "cost"),
+            f"expected_total_cost={estimate.expected_total:.6f}",
+            estimate,
+        )
 
     def _latency(self, candidate: RoutingCandidate) -> tuple[float, str]:
         evidence = candidate.performance_evidence
@@ -302,16 +311,17 @@ class DeterministicRouterScorer:
 
         from collections.abc import Callable
 
+        cost_estimate: CostToAcceptedEstimate | None = None
+
         factor_methods: dict[str, Callable[[], tuple[float, str]]] = {
             "expected_success": lambda: self._expected_success(candidate, request),
             "role_fit": lambda: self._role_fit(candidate, request),
             "risk_fit": lambda: self._risk_fit(candidate, request),
-            "empirical_reliability": lambda: self._empirical_reliability(candidate, request),
+            "empirical_reliability": lambda: self._empirical_reliability(candidate),
             "context_suitability": lambda: self._context_suitability(candidate, request),
             "recent_performance": lambda: self._recent_performance(candidate),
             "provider_health": lambda: self._provider_health(candidate),
             "quota_pressure": lambda: self._quota_pressure(candidate),
-            "cost": lambda: self._cost(candidate, request),
             "latency": lambda: self._latency(candidate),
             "affinity": lambda: self._affinity(candidate, state),
             "diversity_reserve": lambda: self._diversity_reserve(candidate, state),
@@ -335,9 +345,26 @@ class DeterministicRouterScorer:
             )
             total += contribution
 
+        # Cost factor is computed separately so its estimate can be recorded.
+        cost_value, cost_provenance, cost_estimate = self._cost(candidate, request)
+        cost_weight = self._weights.cost
+        cost_normalized = self._normalize(cost_value, "cost")
+        cost_contribution = cost_normalized * cost_weight
+        weighted_factors.append(
+            WeightedFactor(
+                name="cost",
+                normalized_value=cost_normalized,
+                weight=cost_weight,
+                contribution=cost_contribution,
+                provenance=cost_provenance,
+            )
+        )
+        total += cost_contribution
+
         total = self._finite(total, "total")
         return CandidateScore(
             total_score=total,
             weighted_factors=tuple(weighted_factors),
             tie_break_key=candidate.identity_key,
+            cost_estimate=cost_estimate,
         )

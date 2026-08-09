@@ -9,7 +9,7 @@ from .decision import ExclusionRecord, RoutingDecision, RoutingDecisionRecord
 from .eligibility import CandidateEligibilityPipeline, EligibilityResult, ExclusionReason
 from .explanation import ExplanationFormatter
 from .fallback import EmergencyFallbackRouter
-from .fingerprint import input_fingerprint
+from .fingerprint import input_fingerprint, routing_input_fingerprint
 from .priors import ModelRoutingPrior, PriorBlender
 from .request import DynamicRoutingRequest
 from .router import RoutingCoordinator
@@ -49,4 +49,5 @@ __all__ = [
     "estimate_cost_to_accepted",
     "input_fingerprint",
     "load_router_config",
+    "routing_input_fingerprint",
 ]

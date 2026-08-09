@@ -29,11 +29,22 @@ def estimate_cost_to_accepted(
     default_retry_rate: float = 0.1,
     default_repair_rate: float = 0.1,
     default_success_rate: float = 0.7,
+    currency: str = "USD",
 ) -> CostToAcceptedEstimate:
     """Compute expected total cost including retries, repairs, and reviews.
 
     Unknown pricing results in ``None`` expected_total, not zero.
     """
+    if not isinstance(review_cost_multiplier, (int, float)) or review_cost_multiplier < 0:
+        review_cost_multiplier = 0.2
+    if not isinstance(default_retry_rate, (int, float)) or not 0.0 <= default_retry_rate <= 1.0:
+        default_retry_rate = 0.1
+    if not isinstance(default_repair_rate, (int, float)) or not 0.0 <= default_repair_rate <= 1.0:
+        default_repair_rate = 0.1
+    if not isinstance(default_success_rate, (int, float)) or not 0.0 < default_success_rate <= 1.0:
+        default_success_rate = 0.7
+    if not isinstance(currency, str):
+        currency = "USD"
     route_state = candidate.route_cost_state
     caps = candidate.capabilities.cost
     input_cost = route_state.input_cost_per_million if route_state else None
@@ -53,7 +64,7 @@ def estimate_cost_to_accepted(
             expected_repair_cost=None,
             expected_review_cost=None,
             expected_total=None,
-            currency="USD",
+            currency=currency,
             confidence="UNKNOWN",
         )
 
@@ -96,6 +107,6 @@ def estimate_cost_to_accepted(
         expected_repair_cost=expected_repair_cost,
         expected_review_cost=expected_review_cost,
         expected_total=expected_total,
-        currency="USD",
+        currency=currency,
         confidence=confidence,
     )

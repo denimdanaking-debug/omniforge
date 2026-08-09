@@ -319,10 +319,11 @@ class CandidateEligibilityPipeline:
                 )
                 continue
             route_state = candidate.route_cost_state
+            # RATE_LIMITED means the route cannot presently dispatch; it must be
+            # excluded until the recovery state machine marks it eligible again.
             if route_state is not None and route_state.health not in {
                 RouteHealth.HEALTHY,
                 RouteHealth.DEGRADED,
-                RouteHealth.RATE_LIMITED,
             }:
                 exclusions.append(
                     self._exclude(
