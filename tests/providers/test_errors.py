@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
+import json
+
 import pytest
 
 from src.providers.errors import (
@@ -11,6 +14,8 @@ from src.providers.errors import (
 )
 from src.providers.identity import ProviderIdentity
 from src.routing.model_identity import ModelIdentity
+
+SENTINEL = "OMNIFORGE_TEST_SECRET_SENTINEL_errors_12345"
 
 
 @pytest.mark.parametrize(
@@ -116,3 +121,64 @@ def test_error_requires_message() -> None:
 def test_error_safe_diagnostic_defaults_to_message() -> None:
     error = ProviderError(code=ProviderErrorCode.UNKNOWN, message="boom")
     assert error.safe_diagnostic_message == "boom"
+
+
+def test_error_message_is_redacted_at_construction() -> None:
+    error = ProviderError(
+        code=ProviderErrorCode.AUTH_FAILURE,
+        message=f"provider failed password={SENTINEL}",
+    )
+    assert error.safe_diagnostic_message is not None
+    assert SENTINEL not in error.message
+    assert SENTINEL not in error.safe_diagnostic_message
+
+
+def test_error_message_key_aware_redaction_replaces_entire_value() -> None:
+    error = ProviderError(
+        code=ProviderErrorCode.AUTH_FAILURE,
+        message="provider failed",
+        raw_metadata={"password": SENTINEL, "safe": "keep"},
+    )
+    assert error.raw_metadata["password"] == "<redacted>"
+    assert error.raw_metadata["safe"] == "keep"
+    assert SENTINEL not in json.dumps(dataclasses.asdict(error), default=str)
+
+
+def test_error_safe_diagnostic_message_is_redacted_even_when_supplied() -> None:
+    error = ProviderError(
+        code=ProviderErrorCode.AUTH_FAILURE,
+        message="provider failed",
+        safe_diagnostic_message=f"auth failed password={SENTINEL}",
+    )
+    assert error.safe_diagnostic_message is not None
+    assert SENTINEL not in error.safe_diagnostic_message
+
+
+def test_error_raw_metadata_is_key_aware_redacted() -> None:
+    error = ProviderError(
+        code=ProviderErrorCode.AUTH_FAILURE,
+        message="provider failed",
+        raw_metadata={"password": SENTINEL, "other": "ok"},
+    )
+    assert error.raw_metadata["password"] == "<redacted>"
+    assert error.raw_metadata["other"] == "ok"
+    assert SENTINEL not in json.dumps(dataclasses.asdict(error), default=str)
+
+
+def test_error_repr_does_not_leak_sentinel() -> None:
+    error = ProviderError(
+        code=ProviderErrorCode.AUTH_FAILURE,
+        message=f"provider failed password={SENTINEL}",
+        raw_metadata={"password": SENTINEL},
+    )
+    representation = repr(error)
+    assert SENTINEL not in representation
+    assert "<redacted>" in representation
+
+
+def test_error_str_does_not_leak_sentinel() -> None:
+    error = ProviderError(
+        code=ProviderErrorCode.AUTH_FAILURE,
+        message=f"provider failed password={SENTINEL}",
+    )
+    assert SENTINEL not in str(error)
