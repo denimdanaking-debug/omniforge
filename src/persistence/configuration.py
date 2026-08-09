@@ -11,7 +11,7 @@ from typing import Any
 from src.routing.policy import ProjectRoutingPolicy, RoutingPin
 from src.security.redaction import SENSITIVE_STRUCTURED_KEYS, _normalize_key
 
-CURRENT_CONFIG_SCHEMA_VERSION = "1.1.0"
+CURRENT_CONFIG_SCHEMA_VERSION = "1.2.0"
 SUPPORTED_CONFIG_SCHEMA_VERSIONS = frozenset({CURRENT_CONFIG_SCHEMA_VERSION})
 
 Migration = Callable[[dict[str, Any]], dict[str, Any]]
@@ -64,6 +64,22 @@ def _migrate_1_0_0_to_1_1_0(old: dict[str, Any]) -> dict[str, Any]:
             provider.setdefault("routes", {})
     working.setdefault("pins", {})
     working.setdefault("project_policies", {})
+    return working
+
+
+@register_migration("1.1.0", "1.2.0")
+def _migrate_1_1_0_to_1_2_0(old: dict[str, Any]) -> dict[str, Any]:
+    """Add Phase 8 dynamic router configuration with safe defaults."""
+    working = copy.deepcopy(old)
+    working.setdefault("routing_mode", "legacy")
+    working.setdefault("exploration_enabled", False)
+    router_config = working.setdefault("router_config", {})
+    router_config.setdefault("factor_weights", {})
+    router_config.setdefault("priors", [])
+    router_config.setdefault("emergency_fallback_orders", {})
+    router_config.setdefault("cost_metadata", {})
+    router_config.setdefault("default_safety_margin_fraction", 0.1)
+    router_config.setdefault("exploration_enabled", False)
     return working
 
 
@@ -293,7 +309,21 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
         validated_policies[project_id] = validated_policy.to_dict()
     working["project_policies"] = validated_policies
 
+    router_config = working.get("router_config", {})
+    _validate_router_config("router_config", router_config)
+
     return working
+
+
+def _validate_router_config(path: str, value: Any) -> None:
+    from src.routing.dynamic.config import RouterConfig, RouterConfigError
+
+    if not isinstance(value, dict):
+        raise InvalidConfiguration(f"{path} must be an object")
+    try:
+        RouterConfig.from_dict(value)
+    except (RouterConfigError, ValueError) as exc:
+        raise InvalidConfiguration(f"{path} is invalid: {exc}") from exc
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -330,7 +360,7 @@ def extract_administrative_state(config: Mapping[str, Any]) -> dict[str, Any]:
             route_status[route_id] = {"enabled": route.get("enabled", True)}
 
     return {
-        "schema_version": "1.1.0",
+        "schema_version": CURRENT_CONFIG_SCHEMA_VERSION,
         "provider_status": provider_status,
         "model_status": model_status,
         "route_status": route_status,
@@ -338,4 +368,19 @@ def extract_administrative_state(config: Mapping[str, Any]) -> dict[str, Any]:
         "exploration_enabled": working.get("exploration_enabled", False),
         "pins": working.get("pins", {}),
         "project_policies": copy.deepcopy(working.get("project_policies", {})),
+        "router_config": copy.deepcopy(working.get("router_config", {})),
     }
+
+
+def extract_router_config(admin_state: dict[str, Any]) -> Any:
+    """Build a validated RouterConfig from administrative state."""
+    from src.routing.dynamic.config import RouterConfigError, load_router_config
+
+    raw = admin_state.get("router_config", {})
+    if not isinstance(raw, dict):
+        raise InvalidConfiguration("router_config must be an object")
+    try:
+        config = load_router_config(raw)
+    except RouterConfigError as exc:
+        raise InvalidConfiguration(f"router_config is invalid: {exc}") from exc
+    return config
