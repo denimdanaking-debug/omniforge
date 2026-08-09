@@ -11,18 +11,21 @@ from src.providers.errors import ProviderError, ProviderErrorCode
 from src.providers.identity import ProviderHealth, ProviderQuotaState, QuotaSignal
 from src.recovery import FixedClock
 from src.recovery.failure_classification import FailureClassifierInput
+from src.recovery.failure_domain import FailureDomainIndex
 from src.recovery.fingerprint import recovery_input_fingerprint
 from src.recovery.recovery_coordinator import (
     RecoveryCandidate,
     RecoveryCoordinator,
     RecoveryCoordinatorInput,
 )
+from src.recovery.reserve import ReserveCapacityPolicy
 from src.recovery.retry_policy import FailureRecoveryPolicy
 from src.recovery.retry_state import RetryLedger, RetryType
 from src.recovery.state_machine import RouteRecoveryState
 from src.routing.capabilities import ModelCapabilities
 from src.routing.inference_route import InferenceRouteIdentity, RouteType
 from src.routing.model_identity import ModelIdentity
+from src.routing.policy import ProjectRoutingPolicy
 from src.routing.roles import ExecutionRole
 
 
@@ -67,9 +70,10 @@ def _base_inputs(
     policy: FailureRecoveryPolicy | None = None,
     candidates: tuple[RecoveryCandidate, ...] | None = None,
     current_risk: RiskLevel = RiskLevel.R2_NORMAL,
+    **kwargs: object,
 ) -> RecoveryCoordinatorInput:
-    return RecoveryCoordinatorInput(
-        classifier_input=FailureClassifierInput(
+    defaults: dict[str, object] = {
+        "classifier_input": FailureClassifierInput(
             task_id="task-1",
             role=ExecutionRole.CODING,
             provider_error=ProviderError(
@@ -79,16 +83,18 @@ def _base_inputs(
             model_id="gpt-4o",
             route_id="openai-direct",
         ),
-        candidates=candidates
+        "candidates": candidates
         or (
             _candidate("openai", "gpt-4o", "openai-direct"),
             _candidate("anthropic", "claude", "anthropic-direct"),
         ),
-        ledger=ledger or RetryLedger("task-1"),
-        policy=policy or FailureRecoveryPolicy(),
-        current_risk=current_risk,
-        role=ExecutionRole.CODING,
-    )
+        "ledger": ledger or RetryLedger("task-1"),
+        "policy": policy or FailureRecoveryPolicy(),
+        "current_risk": current_risk,
+        "role": ExecutionRole.CODING,
+    }
+    defaults.update(kwargs)
+    return RecoveryCoordinatorInput(**defaults)  # type: ignore[arg-type]
 
 
 class TestRecoveryFingerprint:
@@ -216,3 +222,76 @@ class TestRecoveryFingerprint:
         )
         assert "secret" not in fp.lower()
         assert "password" not in fp.lower()
+
+
+class TestRecoveryFingerprintCompleteness:
+    def test_multiple_exhausted_paths_fingerprint_succeeds(self, clock: FixedClock) -> None:
+        ledger = RetryLedger("task-1")
+        ledger.mark_exhausted_path("sig-a", "openai", "gpt-4o")
+        ledger.mark_exhausted_path("sig-b", "anthropic", "claude")
+        inputs = _base_inputs(clock, ledger=ledger)
+        RecoveryCoordinator(clock=clock).decide(inputs)
+
+    def test_exhausted_path_ordering_invariant(self, clock: FixedClock) -> None:
+        ledger1 = RetryLedger("task-1")
+        ledger1.mark_exhausted_path("sig-a", "openai", "gpt-4o")
+        ledger1.mark_exhausted_path("sig-b", "anthropic", "claude")
+        ledger2 = RetryLedger("task-1")
+        ledger2.mark_exhausted_path("sig-b", "anthropic", "claude")
+        ledger2.mark_exhausted_path("sig-a", "openai", "gpt-4o")
+        inputs1 = _base_inputs(clock, ledger=ledger1)
+        inputs2 = _base_inputs(clock, ledger=ledger2)
+        coordinator = RecoveryCoordinator(clock=clock)
+        d1 = coordinator.decide(inputs1)
+        d2 = coordinator.decide(inputs2)
+        assert d1.deterministic_input_fingerprint == d2.deterministic_input_fingerprint
+
+    def test_provider_enabled_change_changes_fingerprint(self, clock: FixedClock) -> None:
+        inputs1 = _base_inputs(clock)
+        inputs2 = _base_inputs(clock, provider_enabled={"openai": False})
+        d1 = RecoveryCoordinator(clock=clock).decide(inputs1)
+        d2 = RecoveryCoordinator(clock=clock).decide(inputs2)
+        assert d1.deterministic_input_fingerprint != d2.deterministic_input_fingerprint
+
+    def test_project_prohibition_change_changes_fingerprint(self, clock: FixedClock) -> None:
+        inputs1 = _base_inputs(clock)
+        inputs2 = _base_inputs(
+            clock,
+            project_policy=ProjectRoutingPolicy(prohibited_provider_ids=frozenset({"openai"})),
+        )
+        d1 = RecoveryCoordinator(clock=clock).decide(inputs1)
+        d2 = RecoveryCoordinator(clock=clock).decide(inputs2)
+        assert d1.deterministic_input_fingerprint != d2.deterministic_input_fingerprint
+
+    def test_reserve_state_change_changes_fingerprint(self, clock: FixedClock) -> None:
+        inputs1 = _base_inputs(clock)
+        reserve = ReserveCapacityPolicy(
+            reserved_provider_ids=frozenset({"anthropic"}),
+            reserved_roles=frozenset({"review"}),
+        )
+        inputs2 = _base_inputs(clock, reserve_policy=reserve)
+        d1 = RecoveryCoordinator(clock=clock).decide(inputs1)
+        d2 = RecoveryCoordinator(clock=clock).decide(inputs2)
+        assert d1.deterministic_input_fingerprint != d2.deterministic_input_fingerprint
+
+    def test_quota_domain_state_change_changes_fingerprint(self, clock: FixedClock) -> None:
+        inputs1 = _base_inputs(clock)
+        inputs2 = _base_inputs(
+            clock,
+            quota_domain_states={
+                "shared": ProviderQuotaState(provider_signal=QuotaSignal.EXHAUSTED)
+            },
+        )
+        d1 = RecoveryCoordinator(clock=clock).decide(inputs1)
+        d2 = RecoveryCoordinator(clock=clock).decide(inputs2)
+        assert d1.deterministic_input_fingerprint != d2.deterministic_input_fingerprint
+
+    def test_failure_domain_index_change_changes_fingerprint(self, clock: FixedClock) -> None:
+        inputs1 = _base_inputs(clock)
+        index = FailureDomainIndex()
+        index.register("openai-direct", "shared-domain")
+        index.register("anthropic-direct", "shared-domain")
+        inputs2 = _base_inputs(clock, failure_domain_index=index)
+        d1 = RecoveryCoordinator(clock=clock).decide(inputs1)
+        d2 = RecoveryCoordinator(clock=clock).decide(inputs2)
+        assert d1.deterministic_input_fingerprint != d2.deterministic_input_fingerprint

@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from src.context.budget import estimate_tokens
+from src.providers.identity import ProviderQuotaState
 from src.recovery.failure_domain import FailureDomainIndex
 from src.recovery.reserve import ReserveCapacityPolicy
 from src.routing.dynamic.candidate import RoutingCandidate
@@ -38,7 +39,22 @@ def _required_context_tokens(inputs: RecoveryCoordinatorInput) -> int | None:
     return None
 
 
-def _recovery_candidate_to_routing(candidate: RecoveryCandidate) -> RoutingCandidate:
+def _effective_quota(
+    candidate: RecoveryCandidate,
+    quota_domain_states: dict[str, ProviderQuotaState] | None,
+) -> ProviderQuotaState | None:
+    """Return the effective quota state, preferring shared domain state."""
+    if candidate.quota_domain and quota_domain_states:
+        domain_state = quota_domain_states.get(candidate.quota_domain)
+        if domain_state is not None:
+            return domain_state
+    return candidate.quota
+
+
+def _recovery_candidate_to_routing(
+    candidate: RecoveryCandidate,
+    quota_domain_states: dict[str, ProviderQuotaState] | None,
+) -> RoutingCandidate:
     """Adapt a recovery candidate to the dynamic-routing candidate shape."""
     return RoutingCandidate(
         provider_id=candidate.provider_id,
@@ -48,7 +64,7 @@ def _recovery_candidate_to_routing(candidate: RecoveryCandidate) -> RoutingCandi
         route_identity=candidate.route_identity,
         capabilities=candidate.capabilities,
         recovery_state=candidate.recovery_state,
-        quota_state=candidate.quota,
+        quota_state=_effective_quota(candidate, quota_domain_states),
         operational_state=candidate.operational_state,
         route_cost_state=candidate.route_cost_state,
     )
@@ -108,7 +124,9 @@ def evaluate_recovery_eligibility(
     if failure_domain_index is None:
         failure_domain_index = FailureDomainIndex()
 
-    routing_candidates = tuple(_recovery_candidate_to_routing(c) for c in inputs.candidates)
+    routing_candidates = tuple(
+        _recovery_candidate_to_routing(c, inputs.quota_domain_states) for c in inputs.candidates
+    )
 
     pipeline = CandidateEligibilityPipeline(
         policy_engine=policy_engine,

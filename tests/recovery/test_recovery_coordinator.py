@@ -487,7 +487,14 @@ class TestPlanning:
     def test_invalid_plan_preserves_rejection_evidence(
         self, clock: FixedClock, policy: FailureRecoveryPolicy
     ) -> None:
-        candidates = (_candidate("openai", "gpt-4o", "openai-direct"),)
+        candidates = (
+            _candidate(
+                "openai",
+                "gpt-4o",
+                "openai-direct",
+                supported_roles=frozenset({ExecutionRole.PLANNING.value}),
+            ),
+        )
         inputs = FailureClassifierInput(
             task_id="task-1",
             role=ExecutionRole.PLANNING,
@@ -926,3 +933,182 @@ class TestRetryStormPrevention:
         assert d1.selected_candidate is not None
         assert d2.selected_candidate is not None
         assert d1.selected_candidate.key == d2.selected_candidate.key
+
+
+class TestCurrentCandidateEligibility:
+    """Same-candidate retries must survive canonical Phase 8 eligibility."""
+
+    def test_transient_same_route_not_selected_when_route_disabled(
+        self, clock: FixedClock, policy: FailureRecoveryPolicy
+    ) -> None:
+        candidates = (
+            _candidate("openai", "gpt-4o", "openai-direct"),
+            _candidate("anthropic", "claude", "anthropic-direct"),
+        )
+        inputs = FailureClassifierInput(
+            task_id="task-1",
+            role=ExecutionRole.CODING,
+            provider_error=ProviderError(
+                code=ProviderErrorCode.TRANSIENT_TRANSPORT, message="timeout"
+            ),
+            provider_id="openai",
+            model_id="gpt-4o",
+            route_id="openai-direct",
+        )
+        coord_input = RecoveryCoordinatorInput(
+            classifier_input=inputs,
+            candidates=candidates,
+            ledger=RetryLedger("task-1"),
+            policy=policy,
+            current_risk=RiskLevel.R2_NORMAL,
+            route_enabled={"openai-direct": False},
+            role=ExecutionRole.CODING,
+        )
+        decision = RecoveryCoordinator(clock=clock).decide(coord_input)
+        assert (
+            decision.selected_candidate is None
+            or decision.selected_candidate.route_id != "openai-direct"
+        )
+
+    def test_constrained_output_retry_not_selected_when_model_disabled(
+        self, clock: FixedClock, policy: FailureRecoveryPolicy
+    ) -> None:
+        candidates = (
+            _candidate("openai", "gpt-4o", "openai-direct"),
+            _candidate("anthropic", "claude", "anthropic-direct"),
+        )
+        inputs = FailureClassifierInput(
+            task_id="task-1",
+            role=ExecutionRole.CODING,
+            structured_output_validation=StructuredOutputValidationResult(
+                missing_required_fields=("risk",)
+            ),
+            provider_id="openai",
+            model_id="gpt-4o",
+            route_id="openai-direct",
+        )
+        coord_input = RecoveryCoordinatorInput(
+            classifier_input=inputs,
+            candidates=candidates,
+            ledger=RetryLedger("task-1"),
+            policy=policy,
+            current_risk=RiskLevel.R2_NORMAL,
+            model_enabled={"gpt-4o": False},
+            role=ExecutionRole.CODING,
+        )
+        decision = RecoveryCoordinator(clock=clock).decide(coord_input)
+        assert (
+            decision.selected_candidate is None or decision.selected_candidate.model_id != "gpt-4o"
+        )
+
+    def test_replan_not_selected_when_route_unhealthy(
+        self, clock: FixedClock, policy: FailureRecoveryPolicy
+    ) -> None:
+        candidates = (
+            _candidate(
+                "openai",
+                "gpt-4o",
+                "openai-direct",
+                supported_roles=frozenset({ExecutionRole.PLANNING.value}),
+                health=ProviderHealth.UNAVAILABLE,
+            ),
+            _candidate(
+                "anthropic",
+                "claude",
+                "anthropic-direct",
+                supported_roles=frozenset({ExecutionRole.PLANNING.value}),
+            ),
+        )
+        inputs = FailureClassifierInput(
+            task_id="task-1",
+            role=ExecutionRole.PLANNING,
+            planning_validation=PlanningValidationResult(missing_steps=("validate",)),
+            provider_id="openai",
+            model_id="gpt-4o",
+            route_id="openai-direct",
+        )
+        coord_input = RecoveryCoordinatorInput(
+            classifier_input=inputs,
+            candidates=candidates,
+            ledger=RetryLedger("task-1"),
+            policy=policy,
+            current_risk=RiskLevel.R2_NORMAL,
+            role=ExecutionRole.PLANNING,
+        )
+        decision = RecoveryCoordinator(clock=clock).decide(coord_input)
+        assert (
+            decision.selected_candidate is None
+            or decision.selected_candidate.route_id != "openai-direct"
+        )
+
+    def test_repair_not_selected_when_provider_quota_exhausted(
+        self, clock: FixedClock, policy: FailureRecoveryPolicy
+    ) -> None:
+        candidates = (
+            _candidate(
+                "openai",
+                "gpt-4o",
+                "openai-direct",
+                quota=ProviderQuotaState(provider_signal=QuotaSignal.EXHAUSTED),
+            ),
+            _candidate("anthropic", "claude", "anthropic-direct"),
+        )
+        inputs = FailureClassifierInput(
+            task_id="task-1",
+            role=ExecutionRole.CODING,
+            deterministic_validation=ValidationResultSummary(
+                validator="pytest",
+                passed=False,
+                failing_check_names=("test_foo",),
+                exit_status=1,
+            ),
+            provider_id="openai",
+            model_id="gpt-4o",
+            route_id="openai-direct",
+        )
+        coord_input = RecoveryCoordinatorInput(
+            classifier_input=inputs,
+            candidates=candidates,
+            ledger=RetryLedger("task-1"),
+            policy=policy,
+            current_risk=RiskLevel.R2_NORMAL,
+            role=ExecutionRole.CODING,
+        )
+        decision = RecoveryCoordinator(clock=clock).decide(coord_input)
+        assert (
+            decision.selected_candidate is None
+            or decision.selected_candidate.provider_id != "openai"
+        )
+
+    def test_unknown_retry_not_selected_when_current_route_rate_limited(
+        self, clock: FixedClock, policy: FailureRecoveryPolicy
+    ) -> None:
+        candidates = (
+            _candidate(
+                "openai",
+                "gpt-4o",
+                "openai-direct",
+                health=ProviderHealth.RATE_LIMITED,
+            ),
+            _candidate("anthropic", "claude", "anthropic-direct"),
+        )
+        inputs = FailureClassifierInput(
+            task_id="task-1",
+            role=ExecutionRole.CODING,
+            provider_id="openai",
+            model_id="gpt-4o",
+            route_id="openai-direct",
+        )
+        coord_input = RecoveryCoordinatorInput(
+            classifier_input=inputs,
+            candidates=candidates,
+            ledger=RetryLedger("task-1"),
+            policy=policy,
+            current_risk=RiskLevel.R2_NORMAL,
+            role=ExecutionRole.CODING,
+        )
+        decision = RecoveryCoordinator(clock=clock).decide(coord_input)
+        assert (
+            decision.selected_candidate is None
+            or decision.selected_candidate.route_id != "openai-direct"
+        )

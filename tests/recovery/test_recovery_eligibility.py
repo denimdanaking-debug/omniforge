@@ -27,6 +27,7 @@ def _candidate(
     context_tokens: int = 1000,
     failure_domain: str = "",
     quota: ProviderQuotaState | None = None,
+    quota_domain: str | None = None,
     supported_roles: frozenset[str] | None = None,
     code_generation: bool = False,
 ) -> RecoveryCandidate:
@@ -51,6 +52,7 @@ def _candidate(
         ),
         recovery_state=RouteRecoveryState(health=health),
         quota=quota,
+        quota_domain=quota_domain,
         failure_domain=failure_domain or provider_id,
     )
 
@@ -216,3 +218,43 @@ class TestCanonicalEligibilityExclusions:
         eligible1, _ = evaluate_recovery_eligibility(inputs1)
         eligible2, _ = evaluate_recovery_eligibility(inputs2)
         assert {c.key for c in eligible1} == {c.key for c in eligible2}
+
+
+class TestSharedQuotaDomain:
+    def test_exhausted_quota_domain_excludes_candidate_with_healthy_local_quota(self) -> None:
+        candidates = (
+            _candidate(
+                "openai",
+                "gpt-4o",
+                "openai-direct",
+                quota_domain="shared-domain",
+            ),
+            _candidate("anthropic", "claude", "anthropic-direct"),
+        )
+        inputs = _make_input(
+            candidates,
+            quota_domain_states={
+                "shared-domain": ProviderQuotaState(provider_signal=QuotaSignal.EXHAUSTED)
+            },
+        )
+        eligible, _ = evaluate_recovery_eligibility(inputs)
+        assert [c.provider_id for c in eligible] == ["anthropic"]
+
+    def test_healthy_quota_domain_does_not_exclude_candidate(self) -> None:
+        candidates = (
+            _candidate(
+                "openai",
+                "gpt-4o",
+                "openai-direct",
+                quota_domain="shared-domain",
+            ),
+            _candidate("anthropic", "claude", "anthropic-direct"),
+        )
+        inputs = _make_input(
+            candidates,
+            quota_domain_states={
+                "shared-domain": ProviderQuotaState(provider_signal=QuotaSignal.AVAILABLE)
+            },
+        )
+        eligible, _ = evaluate_recovery_eligibility(inputs)
+        assert "openai" in [c.provider_id for c in eligible]
