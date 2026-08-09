@@ -666,7 +666,9 @@ def _normalize_classification_input(inputs: FailureClassifierInput) -> dict[str,
             return None
         return {
             "estimated_input_chars": v.estimated_input_chars,
+            "estimated_input_tokens": v.estimated_input_tokens,
             "model_context_tokens": v.model_context_tokens,
+            "required_context_tokens": v.required_context_tokens,
             "authority_required": v.authority_required,
             "authority_items_present": v.authority_items_present,
             "authority_items_raw": v.authority_items_raw,
