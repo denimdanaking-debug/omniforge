@@ -70,43 +70,60 @@ class EmergencyFallbackRouter:
         for role, keys in orders.items():
             self._fallback_orders[role] = tuple(keys)
 
+    def _deterministic_ranking(
+        self,
+        request: DynamicRoutingRequest,
+        eligible_candidates: tuple[RoutingCandidate, ...],
+    ) -> tuple[RoutingCandidate, ...]:
+        """Return fallback candidates in deterministic order.
+
+        Configured role-specific order takes priority. Any eligible candidates
+        not explicitly listed are appended sorted by canonical identity key.
+        """
+        ordered_keys = self._fallback_orders.get(request.role, ())
+        ranked: list[RoutingCandidate] = []
+        seen: set[str] = set()
+        key_to_candidate = {c.identity_key: c for c in eligible_candidates}
+
+        for key in ordered_keys:
+            candidate = key_to_candidate.get(key)
+            if candidate is not None and candidate.identity_key not in seen:
+                ranked.append(candidate)
+                seen.add(candidate.identity_key)
+
+        for candidate in sorted(eligible_candidates, key=lambda c: c.identity_key):
+            if candidate.identity_key not in seen:
+                ranked.append(candidate)
+                seen.add(candidate.identity_key)
+
+        return tuple(ranked)
+
     def route(
         self,
         request: DynamicRoutingRequest,
         candidates: tuple[RoutingCandidate, ...],
         pipeline: CandidateEligibilityPipeline,
         decision_id: str,
+        *,
+        input_fingerprint: str = "",
+        exploration_enabled: bool = False,
+        fallback_reason: str = "emergency_fallback_triggered",
         context: dict[str, Any] | None = None,
         timestamp: datetime | None = None,
     ) -> RoutingDecision:
         """Return a fallback decision after filtering candidates through eligibility."""
         eligibility = pipeline.evaluate(request, candidates)
-        ordered_keys = self._fallback_orders.get(request.role, ())
-        winner: RoutingCandidate | None = None
-        for key in ordered_keys:
-            for candidate in eligibility.candidates:
-                if candidate.identity_key == key:
-                    winner = candidate
-                    break
-            if winner is not None:
-                break
-        if winner is None and eligibility.candidates:
-            winner = eligibility.candidates[0]
+        ranked = self._deterministic_ranking(request, eligibility.candidates)
 
-        runner_up: RoutingCandidate | None = None
-        if winner is not None and len(eligibility.candidates) > 1:
-            for candidate in eligibility.candidates:
-                if candidate.identity_key != winner.identity_key:
-                    runner_up = candidate
-                    break
+        winner = ranked[0] if ranked else None
+        runner_up = ranked[1] if len(ranked) > 1 else None
 
-        fallback_reason = "emergency_fallback_triggered"
         no_eligible_reason = None if winner is not None else "no eligible fallback candidates"
         record = RoutingDecisionRecord(
             decision_id=decision_id,
             request=request,
             routing_mode="dynamic",
-            exploration_enabled=False,
+            exploration_enabled=exploration_enabled,
             candidates_considered=candidates,
             exclusions=eligibility.exclusions,
             eligible_candidates=eligibility.candidates,
@@ -121,12 +138,12 @@ class EmergencyFallbackRouter:
             fallback_used=True,
             fallback_reason=fallback_reason,
             context_metadata=context or {},
-            input_fingerprint="",
+            input_fingerprint=input_fingerprint,
             timestamp=timestamp or request.timestamp or datetime.now(UTC),
         )
         decision = RoutingDecision(
             selected_candidate=winner,
-            ranked_candidates=eligibility.candidates,
+            ranked_candidates=ranked,
             excluded=eligibility.exclusions,
             record=record,
             explanation="",

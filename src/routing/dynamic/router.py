@@ -98,6 +98,12 @@ class RoutingCoordinator:
         winner = eligibility.candidates[0] if eligibility.candidates else None
         runner_up = eligibility.candidates[1] if len(eligibility.candidates) > 1 else None
         margin = 0.0
+        # Legacy mode does not mutate continuity state, but use a pre-decision
+        # snapshot so the fingerprint semantics match dynamic mode.
+        scoring_state = ScoringState(
+            last_selected_key=self._state.last_selected_key,
+            failure_domain_counts=dict(self._state.failure_domain_counts),
+        )
         record = RoutingDecisionRecord(
             decision_id=f"decision-{uuid.uuid4()}",
             request=request,
@@ -122,7 +128,7 @@ class RoutingCoordinator:
                 candidates=candidates,
                 policy_engine=policy_engine,
                 router_config=router_cfg,
-                scoring_state=self._state,
+                scoring_state=scoring_state,
             ),
             timestamp=timestamp,
         )
@@ -162,6 +168,22 @@ class RoutingCoordinator:
         pipeline = self._make_pipeline(policy_engine, admin_state, context_budget)
         eligibility = pipeline.evaluate(request, candidates)
 
+        # Capture the exact pre-decision logical state. This snapshot must be
+        # used for both scoring and the input fingerprint so the audit trail
+        # describes the state that produced the decision, not state mutated by
+        # the decision itself.
+        scoring_state = ScoringState(
+            last_selected_key=self._state.last_selected_key,
+            failure_domain_counts=dict(self._state.failure_domain_counts),
+        )
+        input_fingerprint = routing_input_fingerprint(
+            request=request,
+            candidates=candidates,
+            policy_engine=policy_engine,
+            router_config=router_cfg,
+            scoring_state=scoring_state,
+        )
+
         scorer = router_cfg.build_scorer()
         fallback_router = router_cfg.build_fallback_router()
 
@@ -171,14 +193,12 @@ class RoutingCoordinator:
                 candidates=candidates,
                 pipeline=pipeline,
                 decision_id=f"decision-{uuid.uuid4()}",
+                input_fingerprint=input_fingerprint,
+                exploration_enabled=exploration_enabled,
+                fallback_reason="no_eligible_candidates",
                 context=context,
                 timestamp=timestamp,
             )
-
-        scoring_state = ScoringState(
-            last_selected_key=self._state.last_selected_key,
-            failure_domain_counts=dict(self._state.failure_domain_counts),
-        )
 
         try:
             scored: list[tuple[RoutingCandidate, CandidateScore]] = []
@@ -191,7 +211,10 @@ class RoutingCoordinator:
                 candidates=candidates,
                 pipeline=pipeline,
                 decision_id=f"decision-{uuid.uuid4()}",
-                context={**(context or {}), "fallback_reason": f"scoring_failed:{exc}"},
+                input_fingerprint=input_fingerprint,
+                exploration_enabled=exploration_enabled,
+                fallback_reason=f"scoring_failed:{exc}",
+                context=context,
                 timestamp=timestamp,
             )
 
@@ -205,13 +228,6 @@ class RoutingCoordinator:
 
         scores = tuple(score for _, score in scored)
         ranked = tuple(candidate for candidate, _ in scored)
-
-        # Update local scoring state for future continuity/diversity.
-        domain = winner.route_identity.failure_domain
-        self._state.failure_domain_counts[domain] = (
-            self._state.failure_domain_counts.get(domain, 0) + 1
-        )
-        self._state.last_selected_key = winner.identity_key
 
         record = RoutingDecisionRecord(
             decision_id=f"decision-{uuid.uuid4()}",
@@ -232,13 +248,7 @@ class RoutingCoordinator:
             fallback_used=False,
             fallback_reason=None,
             context_metadata=context or {},
-            input_fingerprint=routing_input_fingerprint(
-                request=request,
-                candidates=candidates,
-                policy_engine=policy_engine,
-                router_config=router_cfg,
-                scoring_state=self._state,
-            ),
+            input_fingerprint=input_fingerprint,
             timestamp=timestamp,
         )
         decision = RoutingDecision(
@@ -250,6 +260,15 @@ class RoutingCoordinator:
             no_eligible_reason=None,
             emergency_fallback_used=False,
         )
+
+        # Advance continuity/diversity state only after the decision record is
+        # fully fixed, so the next decision sees this decision's effects.
+        domain = winner.route_identity.failure_domain
+        self._state.failure_domain_counts[domain] = (
+            self._state.failure_domain_counts.get(domain, 0) + 1
+        )
+        self._state.last_selected_key = winner.identity_key
+
         explanation = ExplanationFormatter().format(decision)
         return RoutingDecision(
             selected_candidate=decision.selected_candidate,

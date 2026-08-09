@@ -289,6 +289,29 @@ def test_runtime_fallback_order_affects_fallback(
     assert decision.selected_candidate == cheap_unreliable_candidate
 
 
+def test_scoring_failure_fallback_is_auditable(
+    cheap_unreliable_candidate: RoutingCandidate,
+) -> None:
+    """A scoring failure must produce a deterministic, fully audited fallback decision."""
+    request = _request()
+    config = _config("dynamic")
+    config["router_config"] = {
+        "cost_metadata": {"invalid_kwarg_for_forced_fallback": 1.0},
+        "exploration_enabled": True,
+    }
+
+    coordinator = RoutingCoordinator()
+    decision = coordinator.route(request, (cheap_unreliable_candidate,), config)
+
+    assert decision.emergency_fallback_used
+    assert decision.record.fallback_used is True
+    assert len(decision.record.input_fingerprint) > 0
+    assert "scoring_failed" in (decision.record.fallback_reason or "")
+    assert decision.record.exploration_enabled is True
+    assert decision.record.eligible_candidates == (cheap_unreliable_candidate,)
+    assert decision.selected_candidate == cheap_unreliable_candidate
+
+
 def test_runtime_safety_margin_affects_context_eligibility(
     healthy_candidate: RoutingCandidate,
 ) -> None:
@@ -333,3 +356,62 @@ def test_decision_fingerprint_reflects_effective_config(
     decision_b = coordinator.route(request, candidates, config_b)
 
     assert decision_a.record.input_fingerprint != decision_b.record.input_fingerprint
+
+
+def test_fingerprint_uses_pre_decision_state(healthy_candidate: RoutingCandidate) -> None:
+    """The recorded fingerprint must describe the state before the decision mutated it."""
+    from src.persistence.configuration import extract_administrative_state
+    from src.routing.dynamic.config import load_router_config
+    from src.routing.dynamic.fingerprint import routing_input_fingerprint
+    from src.routing.dynamic.scoring import ScoringState
+    from src.routing.policy import ProjectRoutingPolicy, RoutingPolicyEngine
+
+    request = _request()
+    candidates = (healthy_candidate,)
+    config = _config("dynamic")
+
+    coordinator = RoutingCoordinator()
+    assert coordinator.state.last_selected_key is None
+    assert coordinator.state.failure_domain_counts == {}
+
+    decision = coordinator.route(request, candidates, config)
+
+    # Reconstruct the exact policy engine and router config the coordinator used.
+    admin_state = extract_administrative_state(config)
+    policies = admin_state.get("project_policies", {})
+    project_policy = ProjectRoutingPolicy.from_dict(policies.get(request.project_id, {}))
+    provider_status = admin_state.get("provider_status", {})
+    model_status = admin_state.get("model_status", {})
+    route_status = admin_state.get("route_status", {})
+    policy_engine = RoutingPolicyEngine(
+        provider_enabled={k: v.get("enabled", True) for k, v in provider_status.items()},
+        model_enabled={k: v.get("enabled", True) for k, v in model_status.items()},
+        route_enabled={k: v.get("enabled", True) for k, v in route_status.items()},
+        project_policy=project_policy,
+        pin=request.pin,
+    )
+    router_cfg = load_router_config(config.get("router_config", {}))
+
+    # The record fingerprint must match the empty pre-decision state, not the
+    # post-decision state that now contains affinity/diversity updates.
+    pre_decision_state = ScoringState(
+        last_selected_key=None,
+        failure_domain_counts={},
+    )
+    expected_fingerprint = routing_input_fingerprint(
+        request=request,
+        candidates=candidates,
+        policy_engine=policy_engine,
+        router_config=router_cfg,
+        scoring_state=pre_decision_state,
+    )
+    assert decision.record.input_fingerprint == expected_fingerprint
+
+    # Coordinator state advanced after the decision.
+    assert coordinator.state.last_selected_key == healthy_candidate.identity_key
+    assert coordinator.state.failure_domain_counts["openai.com"] == 1
+
+    # A second identical request now gets a different fingerprint because the
+    # pre-decision state has legitimately changed.
+    decision2 = coordinator.route(request, candidates, config)
+    assert decision2.record.input_fingerprint != decision.record.input_fingerprint
