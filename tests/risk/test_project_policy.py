@@ -85,3 +85,72 @@ def test_from_dict_preserves_security_policy() -> None:
     assert "custom/authority.md" in policy.authority_policy.protected_paths
     assert policy.security_policy.default_risk_floor == RiskLevel.R4_CRITICAL_AUTHORITY
     assert policy.path_risk_floors == {"src/security": 3}
+
+
+def test_review_requirement_applies_project_minimum() -> None:
+    policy = ProjectRiskPolicy(review_minimum=3)
+    req = policy.review_requirement(RiskLevel.R2_NORMAL)
+    assert req.reviewer_count == 3
+
+
+def test_review_requirement_preserves_r3_independence() -> None:
+    policy = ProjectRiskPolicy(review_minimum=1)
+    req = policy.review_requirement(RiskLevel.R3_HIGH)
+    assert req.reviewer_count >= 2
+    assert req.minimum_independence == "independent"
+    assert req.require_high_risk_reviewer
+    assert req.prohibit_coder_identity
+    assert req.distinct_failure_domains_required
+
+
+def test_experimentation_policy_tightens_ceiling() -> None:
+    policy = ProjectRiskPolicy(exploration_max_risk=RiskLevel.R0_TRIVIAL)
+    exp_policy = policy.experimentation_policy()
+    assert (
+        exp_policy.check(
+            RiskLevel.R1_LOW,
+            global_exploration_enabled=True,
+            project_exploration_allowed=True,
+        ).allowed
+        is False
+    )
+
+
+def test_experimentation_policy_cannot_loosen_core_ceiling() -> None:
+    policy = ProjectRiskPolicy(exploration_max_risk=RiskLevel.R3_HIGH)
+    exp_policy = policy.experimentation_policy()
+    assert (
+        exp_policy.check(
+            RiskLevel.R2_NORMAL,
+            global_exploration_enabled=True,
+            project_exploration_allowed=True,
+        ).allowed
+        is False
+    )
+
+
+def test_context_requirements_deepen_with_project_minimum() -> None:
+    policy = ProjectRiskPolicy(context_depth_minimum="large_context")
+    req = policy.context_requirements(RiskLevel.R1_LOW)
+    assert req.strategy_preference == "large_context"
+
+
+def test_context_requirements_preserve_r4_raw_authority() -> None:
+    policy = ProjectRiskPolicy(context_depth_minimum="targeted")
+    req = policy.context_requirements(RiskLevel.R4_CRITICAL_AUTHORITY)
+    assert req.strategy_preference == "large_context"
+    assert req.require_raw_authority
+
+
+def test_to_dict_round_trip() -> None:
+    policy = ProjectRiskPolicy(
+        minimum_risk=RiskLevel.R2_NORMAL,
+        review_minimum=2,
+        exploration_max_risk=RiskLevel.R1_LOW,
+        context_depth_minimum="hybrid",
+    )
+    data = policy.to_dict()
+    assert data["minimum_risk"] == 2
+    assert data["review_minimum"] == 2
+    assert data["exploration_max_risk"] == 1
+    assert data["context_depth_minimum"] == "hybrid"

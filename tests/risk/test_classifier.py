@@ -219,3 +219,68 @@ def test_event_ordering_produces_same_maximum_risk() -> None:
     r1 = classifier.classify(_request(changed_files=("src/foo.py",), runtime_events=(e1, e2)))
     r2 = classifier.classify(_request(changed_files=("src/foo.py",), runtime_events=(e2, e1)))
     assert r1.final_risk == r2.final_risk == RiskLevel.R4_CRITICAL_AUTHORITY
+
+
+def test_runtime_event_changes_assessment_fingerprint() -> None:
+    from src.risk import RiskRuntimeEvent, RiskRuntimeEventType
+
+    classifier = InitialRiskClassifier.default()
+    base = classifier.classify(_request(changed_files=("src/foo.py",)))
+    event = RiskRuntimeEvent(
+        event_type=RiskRuntimeEventType.MODEL_DISAGREEMENT,
+        material=True,
+        evidence="material disagreement on approach",
+    )
+    with_event = classifier.classify(
+        _request(changed_files=("src/foo.py",), runtime_events=(event,))
+    )
+    assert with_event.final_risk == RiskLevel.R3_HIGH
+    assert base.fingerprint != with_event.fingerprint
+
+
+def test_runtime_events_included_in_fingerprint_cover_decision_inputs() -> None:
+    from src.risk import RiskRuntimeEvent, RiskRuntimeEventType
+
+    classifier = InitialRiskClassifier.default()
+    event1 = RiskRuntimeEvent(
+        event_type=RiskRuntimeEventType.MODEL_DISAGREEMENT,
+        material=False,
+        evidence="not material",
+    )
+    event2 = RiskRuntimeEvent(
+        event_type=RiskRuntimeEventType.MODEL_DISAGREEMENT,
+        material=True,
+        evidence="material",
+    )
+    r1 = classifier.classify(_request(changed_files=("src/foo.py",), runtime_events=(event1,)))
+    r2 = classifier.classify(_request(changed_files=("src/foo.py",), runtime_events=(event2,)))
+    assert r1.fingerprint != r2.fingerprint
+    assert r2.final_risk == RiskLevel.R3_HIGH
+
+
+def test_unexpected_authority_touch_at_runtime_reaches_r4() -> None:
+    from src.risk import RiskRuntimeEvent, RiskRuntimeEventType
+
+    classifier = InitialRiskClassifier.default()
+    event = RiskRuntimeEvent(
+        event_type=RiskRuntimeEventType.UNEXPECTED_FILE_TOUCH,
+        material=True,
+        evidence="runtime touch",
+        affected_paths=("docs/PROJECT_STATE.json",),
+    )
+    result = classifier.classify(_request(changed_files=("src/foo.py",), runtime_events=(event,)))
+    assert result.final_risk == RiskLevel.R4_CRITICAL_AUTHORITY
+
+
+def test_unexpected_security_touch_at_runtime_is_at_least_r3() -> None:
+    from src.risk import RiskRuntimeEvent, RiskRuntimeEventType
+
+    classifier = InitialRiskClassifier.default()
+    event = RiskRuntimeEvent(
+        event_type=RiskRuntimeEventType.UNEXPECTED_FILE_TOUCH,
+        material=True,
+        evidence="runtime touch",
+        affected_paths=("src/security/secrets.py",),
+    )
+    result = classifier.classify(_request(changed_files=("src/foo.py",), runtime_events=(event,)))
+    assert result.final_risk >= RiskLevel.R3_HIGH

@@ -196,6 +196,52 @@ class ConfigurationVersioningTests(unittest.TestCase):
         with self.assertRaises(configuration.InvalidConfiguration):
             configuration.validate_config(config)
 
+    def test_nested_project_risk_policy_validated(self) -> None:
+        config = self.valid_config()
+        config["project_policies"] = {
+            "project-x": {
+                "risk_policy": {
+                    "minimum_risk": "R3_HIGH",
+                    "review_minimum": 2,
+                    "context_depth_minimum": "hybrid",
+                }
+            }
+        }
+        result = configuration.validate_config(config)
+        risk_policy = result["project_policies"]["project-x"]["risk_policy"]
+        self.assertEqual(risk_policy["minimum_risk"], 3)
+        self.assertEqual(risk_policy["review_minimum"], 2)
+
+    def test_nested_project_risk_policy_rejects_invalid_enum(self) -> None:
+        config = self.valid_config()
+        config["project_policies"] = {
+            "project-x": {"risk_policy": {"minimum_risk": "R5_DOES_NOT_EXIST"}}
+        }
+        with self.assertRaises(configuration.InvalidConfiguration):
+            configuration.validate_config(config)
+
+    def test_nested_project_risk_policy_rejects_negative_review_minimum(self) -> None:
+        config = self.valid_config()
+        config["project_policies"] = {"project-x": {"risk_policy": {"review_minimum": -1}}}
+        with self.assertRaises(configuration.InvalidConfiguration):
+            configuration.validate_config(config)
+
+    def test_nested_project_risk_policy_rejects_unsafe_authority_floor(self) -> None:
+        config = self.valid_config()
+        config["project_policies"] = {
+            "project-x": {"risk_policy": {"authority_policy": {"modify_risk_floor": "R2_NORMAL"}}}
+        }
+        with self.assertRaises(configuration.InvalidConfiguration):
+            configuration.validate_config(config)
+
+    def test_nested_project_risk_policy_rejects_unsafe_security_floor(self) -> None:
+        config = self.valid_config()
+        config["project_policies"] = {
+            "project-x": {"risk_policy": {"security_policy": {"default_risk_floor": "R1_LOW"}}}
+        }
+        with self.assertRaises(configuration.InvalidConfiguration):
+            configuration.validate_config(config)
+
     def test_invalid_routing_mode_rejected(self) -> None:
         config = self.valid_config()
         config["routing_mode"] = "magic"

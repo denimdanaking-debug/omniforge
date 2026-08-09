@@ -38,11 +38,16 @@ class InitialRiskClassifier:
 
     @classmethod
     def default(cls) -> InitialRiskClassifier:
+        authority_policy = AuthoritySensitivePolicy.default()
+        security_policy = SecuritySensitivePolicy.default()
         return cls(
-            authority_policy=AuthoritySensitivePolicy.default(),
-            security_policy=SecuritySensitivePolicy.default(),
+            authority_policy=authority_policy,
+            security_policy=security_policy,
             architecture_detector=ArchitectureImpactDetector.default(),
-            runtime_escalator=RuntimeRiskEscalator.default(),
+            runtime_escalator=RuntimeRiskEscalator.default(
+                authority_policy=authority_policy,
+                security_policy=security_policy,
+            ),
             project_policy=ProjectRiskPolicy.default(),
         )
 
@@ -55,7 +60,10 @@ class InitialRiskClassifier:
             architecture_detector=ArchitectureImpactDetector(
                 ArchitectureThresholds.from_dict(policy.architecture_thresholds)
             ),
-            runtime_escalator=RuntimeRiskEscalator.default(),
+            runtime_escalator=RuntimeRiskEscalator.default(
+                authority_policy=policy.authority_policy,
+                security_policy=policy.security_policy,
+            ),
             project_policy=policy,
         )
 
@@ -187,6 +195,8 @@ class InitialRiskClassifier:
                         evidence=str(item["evidence"]),
                         count=int(item.get("count", 1)),
                         threshold=int(item.get("threshold", 1)),
+                        affected_paths=tuple(item.get("affected_paths", ())),
+                        operation=item.get("operation"),
                     )
                 )
             else:

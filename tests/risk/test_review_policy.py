@@ -90,7 +90,8 @@ def test_override_r2_to_two_reviewers() -> None:
     assert req.minimum_independence == "independent"
     assert req.require_high_risk_reviewer
     assert req.distinct_failure_domains_required
-    assert req.rationale_codes == ("custom_r2",)
+    assert "custom_r2" in req.rationale_codes
+    assert "r2_independent_review" in req.rationale_codes
 
 
 def test_requirement_is_frozen() -> None:
@@ -103,3 +104,24 @@ def test_requirement_is_frozen() -> None:
         rationale_codes=("x",),
     )
     assert req.reviewer_count == 2
+
+
+def test_override_cannot_weaken_review_count() -> None:
+    policy = RiskReviewPolicy(
+        overrides={
+            RiskLevel.R3_HIGH.name: {
+                "reviewer_count": 0,
+                "minimum_independence": "same_provider",
+                "require_high_risk_reviewer": False,
+                "prohibit_coder_identity": False,
+                "distinct_failure_domains_required": False,
+                "rationale_codes": [],
+            }
+        }
+    )
+    req = policy.requirement_for(RiskLevel.R3_HIGH)
+    assert req.reviewer_count == 2
+    assert req.minimum_independence == "independent"
+    assert req.require_high_risk_reviewer
+    assert req.prohibit_coder_identity
+    assert req.distinct_failure_domains_required

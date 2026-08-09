@@ -231,12 +231,25 @@ def _validate_pin(path: str, value: Any) -> RoutingPin:
 
 
 def _validate_project_policy(path: str, value: Any) -> ProjectRoutingPolicy:
+    from src.risk.project_policy import ProjectRiskPolicy
+
     if not isinstance(value, dict):
         raise InvalidConfiguration(f"project policy at {path} must be an object")
     try:
-        return ProjectRoutingPolicy.from_dict(value)
+        _ = ProjectRoutingPolicy.from_dict(value)
     except ValueError as exc:
         raise InvalidConfiguration(f"project policy at {path} is invalid: {exc}") from exc
+
+    risk_policy_raw = value.get("risk_policy", {})
+    try:
+        risk_policy = ProjectRiskPolicy.from_dict(risk_policy_raw)
+    except ValueError as exc:
+        raise InvalidConfiguration(f"{path}.risk_policy is invalid: {exc}") from exc
+
+    value["risk_policy"] = risk_policy.to_dict()
+    # Re-create the routing policy from the normalized dict so that its own
+    # serialized form reflects the validated risk policy.
+    return ProjectRoutingPolicy.from_dict(value)
 
 
 def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:

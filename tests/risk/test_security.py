@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.policy.risk import RiskLevel
 from src.risk import RiskFactorCode, SecuritySensitivePolicy
 
@@ -99,3 +101,34 @@ def test_path_normalization_for_prefix() -> None:
     factor = policy.assess(("./src/security/../security/secrets.py",))
     assert factor is not None
     assert factor.risk_level == RiskLevel.R3_HIGH
+
+
+def test_project_security_paths_merge_with_core() -> None:
+    policy = SecuritySensitivePolicy.from_dict({"sensitive_paths": ["custom/vault.py"]})
+    assert "src/security/secrets.py" in policy.sensitive_paths
+    assert "custom/vault.py" in policy.sensitive_paths
+    factor = policy.assess(("src/security/secrets.py",))
+    assert factor is not None
+    assert factor.risk_level == RiskLevel.R3_HIGH
+
+
+def test_project_security_prefixes_merge_with_core() -> None:
+    policy = SecuritySensitivePolicy.from_dict({"sensitive_path_prefixes": ["custom/vault/"]})
+    assert "src/security/" in policy.sensitive_path_prefixes
+    factor = policy.assess(("src/security/secrets.py",))
+    assert factor is not None
+    assert factor.risk_level == RiskLevel.R3_HIGH
+
+
+def test_project_cannot_lower_security_floor() -> None:
+    from src.risk.security import SecurityPolicyError
+
+    with pytest.raises(SecurityPolicyError):
+        SecuritySensitivePolicy.from_dict({"default_risk_floor": "R1_LOW"})
+
+
+def test_project_can_raise_security_floor() -> None:
+    policy = SecuritySensitivePolicy.from_dict({"default_risk_floor": "R4_CRITICAL_AUTHORITY"})
+    factor = policy.assess(("src/security/secrets.py",))
+    assert factor is not None
+    assert factor.risk_level == RiskLevel.R4_CRITICAL_AUTHORITY

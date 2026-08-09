@@ -4,6 +4,7 @@ from src.policy.risk import RiskLevel, lifecycle_eligible
 from src.risk import (
     InitialRiskClassifier,
     RiskAssessmentRequest,
+    RiskAssessmentResult,
     RiskEligibilityConnector,
     RiskRoutingIntegration,
 )
@@ -102,3 +103,147 @@ def test_risk_classification_does_not_mutate_model_reputation() -> None:
     assert result.factors
     assert all(f.provenance for f in result.factors)
     assert result.final_risk == RiskLevel.R4_CRITICAL_AUTHORITY
+
+
+def test_project_review_minimum_applies_through_connector() -> None:
+    from src.risk import ProjectRiskPolicy
+
+    policy = ProjectRiskPolicy(review_minimum=3)
+    connector = RiskEligibilityConnector(project_risk_policy=policy)
+    result = RiskAssessmentResult(
+        baseline_risk=RiskLevel.R2_NORMAL,
+        final_risk=RiskLevel.R2_NORMAL,
+        factors=(),
+        policy_effects={},
+        fingerprint="fp",
+        explanation="",
+    )
+    integration = connector.integrate(
+        result,
+        task_id="task-1",
+        project_id="project-a",
+        role=ExecutionRole.CODING,
+        task_class="feature",
+    )
+    assert integration.review_requirement.reviewer_count == 3
+
+
+def test_project_review_minimum_cannot_weaken_r3_requirement() -> None:
+    from src.risk import ProjectRiskPolicy
+
+    policy = ProjectRiskPolicy(review_minimum=1)
+    connector = RiskEligibilityConnector(project_risk_policy=policy)
+    result = RiskAssessmentResult(
+        baseline_risk=RiskLevel.R3_HIGH,
+        final_risk=RiskLevel.R3_HIGH,
+        factors=(),
+        policy_effects={},
+        fingerprint="fp",
+        explanation="",
+    )
+    integration = connector.integrate(
+        result,
+        task_id="task-1",
+        project_id="project-a",
+        role=ExecutionRole.CODING,
+        task_class="feature",
+    )
+    assert integration.review_requirement.reviewer_count >= 2
+    assert integration.review_requirement.distinct_failure_domains_required
+
+
+def test_project_exploration_ceiling_tightens() -> None:
+    from src.risk import ProjectRiskPolicy
+
+    policy = ProjectRiskPolicy(exploration_max_risk=RiskLevel.R0_TRIVIAL)
+    connector = RiskEligibilityConnector(project_risk_policy=policy)
+    result = RiskAssessmentResult(
+        baseline_risk=RiskLevel.R1_LOW,
+        final_risk=RiskLevel.R1_LOW,
+        factors=(),
+        policy_effects={},
+        fingerprint="fp",
+        explanation="",
+    )
+    integration = connector.integrate(
+        result,
+        task_id="task-1",
+        project_id="project-a",
+        role=ExecutionRole.CODING,
+        task_class="feature",
+        global_exploration_enabled=True,
+        project_exploration_allowed=True,
+    )
+    assert not integration.experimentation.allowed
+
+
+def test_project_exploration_ceiling_cannot_loosen_core() -> None:
+    from src.risk import ProjectRiskPolicy
+
+    policy = ProjectRiskPolicy(exploration_max_risk=RiskLevel.R3_HIGH)
+    connector = RiskEligibilityConnector(project_risk_policy=policy)
+    result = RiskAssessmentResult(
+        baseline_risk=RiskLevel.R2_NORMAL,
+        final_risk=RiskLevel.R2_NORMAL,
+        factors=(),
+        policy_effects={},
+        fingerprint="fp",
+        explanation="",
+    )
+    integration = connector.integrate(
+        result,
+        task_id="task-1",
+        project_id="project-a",
+        role=ExecutionRole.CODING,
+        task_class="feature",
+        global_exploration_enabled=True,
+        project_exploration_allowed=True,
+    )
+    assert not integration.experimentation.allowed
+
+
+def test_project_context_minimum_deepens() -> None:
+    from src.risk import ProjectRiskPolicy
+
+    policy = ProjectRiskPolicy(context_depth_minimum="large_context")
+    connector = RiskEligibilityConnector(project_risk_policy=policy)
+    result = RiskAssessmentResult(
+        baseline_risk=RiskLevel.R1_LOW,
+        final_risk=RiskLevel.R1_LOW,
+        factors=(),
+        policy_effects={},
+        fingerprint="fp",
+        explanation="",
+    )
+    integration = connector.integrate(
+        result,
+        task_id="task-1",
+        project_id="project-a",
+        role=ExecutionRole.CODING,
+        task_class="feature",
+    )
+    assert integration.context_requirements.strategy_preference == "large_context"
+
+
+def test_project_context_minimum_cannot_weaken_r4_raw_authority() -> None:
+    from src.risk import ProjectRiskPolicy
+
+    policy = ProjectRiskPolicy(context_depth_minimum="targeted")
+    connector = RiskEligibilityConnector(project_risk_policy=policy)
+    result = RiskAssessmentResult(
+        baseline_risk=RiskLevel.R4_CRITICAL_AUTHORITY,
+        final_risk=RiskLevel.R4_CRITICAL_AUTHORITY,
+        factors=(),
+        policy_effects={},
+        fingerprint="fp",
+        explanation="",
+    )
+    integration = connector.integrate(
+        result,
+        task_id="task-1",
+        project_id="project-a",
+        role=ExecutionRole.CODING,
+        task_class="feature",
+    )
+    assert integration.context_requirements.strategy_preference == "large_context"
+    assert integration.context_requirements.require_raw_authority

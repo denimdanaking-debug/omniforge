@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.policy.risk import RiskLevel
 from src.risk import AuthoritySensitivePolicy, RiskFactorCode
 from src.risk.assessment import OperationType
@@ -113,3 +115,50 @@ def test_invalid_operation_defaults_to_modify_floor() -> None:
     factor = policy.assess(("docs/PROJECT_STATE.json",), "unknown_op")
     assert factor is not None
     assert factor.risk_level == RiskLevel.R4_CRITICAL_AUTHORITY
+
+
+def test_project_authority_paths_merge_with_core() -> None:
+    policy = AuthoritySensitivePolicy.from_dict(
+        {"protected_paths": ["custom/project_authority.json"]}
+    )
+    assert "docs/PROJECT_STATE.json" in policy.protected_paths
+    assert "custom/project_authority.json" in policy.protected_paths
+    factor = policy.assess(("docs/PROJECT_STATE.json",), OperationType.MODIFY)
+    assert factor is not None
+    assert factor.risk_level == RiskLevel.R4_CRITICAL_AUTHORITY
+
+
+def test_empty_project_paths_keep_core_authority_protected() -> None:
+    policy = AuthoritySensitivePolicy.from_dict({})
+    assert "docs/PROJECT_STATE.json" in policy.protected_paths
+    factor = policy.assess(("docs/PROJECT_STATE.json",), OperationType.MODIFY)
+    assert factor is not None
+    assert factor.risk_level == RiskLevel.R4_CRITICAL_AUTHORITY
+
+
+def test_project_cannot_lower_authority_modify_floor() -> None:
+    from src.risk.authority import AuthorityPolicyError
+
+    with pytest.raises(AuthorityPolicyError):
+        AuthoritySensitivePolicy.from_dict({"modify_risk_floor": "R2_NORMAL"})
+
+
+def test_project_cannot_lower_authority_delete_floor() -> None:
+    from src.risk.authority import AuthorityPolicyError
+
+    with pytest.raises(AuthorityPolicyError):
+        AuthoritySensitivePolicy.from_dict({"delete_risk_floor": "R1_LOW"})
+
+
+def test_project_cannot_lower_authority_rename_floor() -> None:
+    from src.risk.authority import AuthorityPolicyError
+
+    with pytest.raises(AuthorityPolicyError):
+        AuthoritySensitivePolicy.from_dict({"rename_risk_floor": "R0_TRIVIAL"})
+
+
+def test_project_can_raise_authority_floor() -> None:
+    policy = AuthoritySensitivePolicy.from_dict({"read_risk_floor": "R3_HIGH"})
+    factor = policy.assess(("docs/PROJECT_STATE.json",), OperationType.READ)
+    assert factor is not None
+    assert factor.risk_level == RiskLevel.R3_HIGH

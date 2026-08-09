@@ -33,6 +33,10 @@ _DEFAULT_SECURITY_PREFIXES: tuple[str, ...] = (
     ".github/workflows/",
 )
 
+# Core safety floor for security-sensitive changes. Project policy may raise it
+# but never lower it.
+_MIN_SECURITY_FLOOR = RiskLevel.R3_HIGH
+
 
 def _normalize_repo_path(path: str) -> str:
     """Return a deterministic repo-relative path string."""
@@ -45,6 +49,10 @@ def _normalize_repo_path(path: str) -> str:
         elif part != "." and part != "/":
             parts.append(part)
     return "/".join(parts)
+
+
+class SecurityPolicyError(ValueError):
+    """Raised when a project security policy attempts to weaken core safety."""
 
 
 @dataclass(frozen=True)
@@ -64,12 +72,24 @@ class SecuritySensitivePolicy:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SecuritySensitivePolicy:
+        """Build a policy that merges project additions with immutable core surfaces.
+
+        Project config may add sensitive paths/prefixes and raise the floor. It
+        may not remove core security surfaces or lower the core floor.
+        """
+        project_paths = frozenset(data.get("sensitive_paths", set()))
+        project_prefixes = tuple(data.get("sensitive_path_prefixes", ()))
+        floor = coerce_risk_level(data.get("default_risk_floor", RiskLevel.R3_HIGH))
+
+        if floor < _MIN_SECURITY_FLOOR:
+            raise SecurityPolicyError(
+                f"security default_risk_floor cannot be lower than {_MIN_SECURITY_FLOOR.name}"
+            )
+
         return cls(
-            sensitive_paths=frozenset(data.get("sensitive_paths", _DEFAULT_SECURITY_PATHS)),
-            sensitive_path_prefixes=tuple(
-                data.get("sensitive_path_prefixes", _DEFAULT_SECURITY_PREFIXES)
-            ),
-            default_risk_floor=coerce_risk_level(data.get("default_risk_floor", RiskLevel.R3_HIGH)),
+            sensitive_paths=_DEFAULT_SECURITY_PATHS | project_paths,
+            sensitive_path_prefixes=_DEFAULT_SECURITY_PREFIXES + project_prefixes,
+            default_risk_floor=floor,
         )
 
     def _is_sensitive(self, path: str) -> bool:

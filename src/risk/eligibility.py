@@ -12,6 +12,7 @@ from src.routing.roles import ExecutionRole
 from .assessment import RiskAssessmentResult
 from .context_policy import RiskContextPolicy, RiskContextRequirements
 from .experimentation import ExperimentationEligibility, ExperimentationEligibilityPolicy
+from .project_policy import ProjectRiskPolicy
 from .review_policy import RiskReviewPolicy, RiskReviewRequirement
 
 
@@ -33,12 +34,14 @@ class RiskEligibilityConnector:
         review_policy: RiskReviewPolicy | None = None,
         experimentation_policy: ExperimentationEligibilityPolicy | None = None,
         context_policy: RiskContextPolicy | None = None,
+        project_risk_policy: ProjectRiskPolicy | None = None,
     ) -> None:
         self._review_policy = review_policy or RiskReviewPolicy.default()
         self._experimentation_policy = (
             experimentation_policy or ExperimentationEligibilityPolicy.default()
         )
         self._context_policy = context_policy or RiskContextPolicy.default()
+        self._project_risk_policy = project_risk_policy
 
     @classmethod
     def default(cls) -> RiskEligibilityConnector:
@@ -85,7 +88,13 @@ class RiskEligibilityConnector:
         project_review_minimum: int | None = None,
         **routing_kwargs: Any,
     ) -> RiskRoutingIntegration:
-        """Return risk-derived routing, review, experimentation, and context inputs."""
+        """Return risk-derived routing, review, experimentation, and context inputs.
+
+        If a ``ProjectRiskPolicy`` was supplied to the connector, its canonical
+        seams determine review, experimentation, and context requirements. Those
+        seams only tighten core defaults. Otherwise the connector falls back to
+        its base policies.
+        """
         routing_request = self.build_routing_request(
             result,
             task_id=task_id,
@@ -94,16 +103,27 @@ class RiskEligibilityConnector:
             task_class=task_class,
             **routing_kwargs,
         )
-        review_requirement = self._review_policy.requirement_for(
-            result.final_risk,
-            project_minimum=project_review_minimum,
-        )
-        experimentation = self._experimentation_policy.check(
-            result.final_risk,
-            global_exploration_enabled=global_exploration_enabled,
-            project_exploration_allowed=project_exploration_allowed,
-        )
-        context_requirements = self._context_policy.requirements_for(result.final_risk)
+
+        if self._project_risk_policy is not None:
+            review_requirement = self._project_risk_policy.review_requirement(result.final_risk)
+            experimentation = self._project_risk_policy.experimentation_policy().check(
+                result.final_risk,
+                global_exploration_enabled=global_exploration_enabled,
+                project_exploration_allowed=project_exploration_allowed,
+            )
+            context_requirements = self._project_risk_policy.context_requirements(result.final_risk)
+        else:
+            review_requirement = self._review_policy.requirement_for(
+                result.final_risk,
+                project_minimum=project_review_minimum,
+            )
+            experimentation = self._experimentation_policy.check(
+                result.final_risk,
+                global_exploration_enabled=global_exploration_enabled,
+                project_exploration_allowed=project_exploration_allowed,
+            )
+            context_requirements = self._context_policy.requirements_for(result.final_risk)
+
         return RiskRoutingIntegration(
             routing_request=routing_request,
             review_requirement=review_requirement,

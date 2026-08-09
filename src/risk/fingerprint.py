@@ -9,6 +9,7 @@ from typing import Any
 from src.routing.roles import ExecutionRole
 
 from .assessment import RiskAssessmentRequest
+from .runtime import RiskRuntimeEvent
 
 
 def _normalize_path(path: str) -> str:
@@ -48,8 +49,43 @@ def _canonical_value(value: Any) -> Any:
     return str(value)
 
 
+def _normalize_runtime_event(event: Any) -> dict[str, Any]:
+    """Return a deterministic, evidence-free fingerprint payload for an event.
+
+    The fingerprint covers every decision-driving field: event type, materiality,
+    count, effective threshold, structured affected paths, and operation. Free-text
+    evidence is excluded because it is for display/audit only.
+    """
+    if isinstance(event, RiskRuntimeEvent):
+        return {
+            "event_type": event.event_type.value,
+            "material": event.material,
+            "count": event.count,
+            "threshold": event.threshold,
+            "affected_paths": sorted(_normalize_path(p) for p in event.affected_paths),
+            "operation": str(event.operation) if event.operation is not None else None,
+        }
+    if isinstance(event, dict):
+        return {
+            "event_type": str(event.get("event_type", "")),
+            "material": bool(event.get("material", True)),
+            "count": int(event.get("count", 1)),
+            "threshold": int(event.get("threshold", 1)),
+            "affected_paths": sorted(_normalize_path(p) for p in event.get("affected_paths", ())),
+            "operation": str(event.get("operation"))
+            if event.get("operation") is not None
+            else None,
+        }
+    return {"repr": str(event)}
+
+
 def risk_assessment_fingerprint(request: RiskAssessmentRequest) -> str:
-    """Return a deterministic SHA-256 fingerprint of the assessment input."""
+    """Return a deterministic SHA-256 fingerprint of the assessment input.
+
+    The fingerprint describes the full logical state that produced the risk
+    decision, including normalized runtime events because they affect the final
+    risk level. Free-text evidence is excluded.
+    """
     payload: dict[str, Any] = {
         "project_id": request.project_id,
         "task_id": request.task_id,
@@ -62,8 +98,10 @@ def risk_assessment_fingerprint(request: RiskAssessmentRequest) -> str:
         "generated_files": sorted(_normalize_path(p) for p in request.generated_files),
         "explicit_paths": sorted(_normalize_path(p) for p in request.explicit_paths),
         "baseline_risk": request.baseline_risk.value if request.baseline_risk else None,
-        # Runtime events are intentionally excluded: the fingerprint describes the
-        # logical classification input, not volatile runtime history.
+        "runtime_events": sorted(
+            (_normalize_runtime_event(e) for e in request.runtime_events),
+            key=lambda d: json.dumps(d, sort_keys=True),
+        ),
         "project_policy": _canonical_value(request.project_policy),
     }
     canonical = _canonical_value(payload)

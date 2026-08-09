@@ -123,7 +123,7 @@ def test_risk_explanation_has_no_hidden_reasoning() -> None:
     assert all(reason in (f.evidence for f in result.factors) for reason in explanation.reasons)
 
 
-def test_runtime_events_do_not_affect_input_fingerprint() -> None:
+def test_runtime_events_affect_input_fingerprint() -> None:
     from src.risk import risk_assessment_fingerprint
 
     base = RiskAssessmentRequest(
@@ -147,4 +147,6 @@ def test_runtime_events_do_not_affect_input_fingerprint() -> None:
             ),
         ),
     )
-    assert risk_assessment_fingerprint(base) == risk_assessment_fingerprint(with_event)
+    # Runtime events are decision inputs because they can change final_risk,
+    # so the fingerprint must differ when they differ.
+    assert risk_assessment_fingerprint(base) != risk_assessment_fingerprint(with_event)

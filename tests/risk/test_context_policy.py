@@ -90,3 +90,26 @@ def test_requirements_is_frozen() -> None:
         rationale="x",
     )
     assert req.strategy_preference == "targeted"
+
+
+def test_override_cannot_remove_r4_raw_authority() -> None:
+    policy = RiskContextPolicy(
+        overrides={
+            RiskLevel.R4_CRITICAL_AUTHORITY.name: {
+                "strategy_preference": "targeted",
+                "authority_required": False,
+                "require_raw_authority": False,
+                "include_test_evidence": False,
+                "include_historical_findings": False,
+                "budget_multiplier": 0.5,
+                "rationale": "weakened",
+            }
+        }
+    )
+    req = policy.requirements_for(RiskLevel.R4_CRITICAL_AUTHORITY)
+    assert req.strategy_preference == "large_context"
+    assert req.authority_required
+    assert req.require_raw_authority
+    assert req.include_test_evidence
+    assert req.include_historical_findings
+    assert req.budget_multiplier >= 2.0

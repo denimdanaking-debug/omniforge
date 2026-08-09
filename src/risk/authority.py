@@ -25,6 +25,13 @@ _CORE_AUTHORITY_PREFIXES: tuple[str, ...] = (
     "docs/roadmap/",
 )
 
+# Core safety floors for authority-mutating operations. These may only be
+# raised by project policy; they can never be lowered.
+_MIN_MODIFY_FLOOR = RiskLevel.R4_CRITICAL_AUTHORITY
+_MIN_DELETE_FLOOR = RiskLevel.R4_CRITICAL_AUTHORITY
+_MIN_RENAME_FLOOR = RiskLevel.R4_CRITICAL_AUTHORITY
+_MIN_READ_FLOOR = RiskLevel.R0_TRIVIAL
+
 
 def _normalize_repo_path(path: str) -> str:
     """Return a deterministic repo-relative path string."""
@@ -37,6 +44,10 @@ def _normalize_repo_path(path: str) -> str:
         elif part != "." and part != "/":
             parts.append(part)
     return "/".join(parts)
+
+
+class AuthorityPolicyError(ValueError):
+    """Raised when a project authority policy attempts to weaken core safety."""
 
 
 @dataclass(frozen=True)
@@ -59,21 +70,49 @@ class AuthoritySensitivePolicy:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AuthoritySensitivePolicy:
+        """Build a policy that merges project additions with immutable core surfaces.
+
+        Project config may add protected paths/prefixes and raise floors. It may
+        not remove core authority surfaces or lower core floors.
+        """
+        project_paths = frozenset(data.get("protected_paths", set()))
+        project_prefixes = tuple(data.get("protected_path_prefixes", ()))
+
+        modify_floor = coerce_risk_level(
+            data.get("modify_risk_floor", RiskLevel.R4_CRITICAL_AUTHORITY)
+        )
+        delete_floor = coerce_risk_level(
+            data.get("delete_risk_floor", RiskLevel.R4_CRITICAL_AUTHORITY)
+        )
+        rename_floor = coerce_risk_level(
+            data.get("rename_risk_floor", RiskLevel.R4_CRITICAL_AUTHORITY)
+        )
+        read_floor = coerce_risk_level(data.get("read_risk_floor", RiskLevel.R1_LOW))
+
+        if modify_floor < _MIN_MODIFY_FLOOR:
+            raise AuthorityPolicyError(
+                f"authority modify_risk_floor cannot be lower than {_MIN_MODIFY_FLOOR.name}"
+            )
+        if delete_floor < _MIN_DELETE_FLOOR:
+            raise AuthorityPolicyError(
+                f"authority delete_risk_floor cannot be lower than {_MIN_DELETE_FLOOR.name}"
+            )
+        if rename_floor < _MIN_RENAME_FLOOR:
+            raise AuthorityPolicyError(
+                f"authority rename_risk_floor cannot be lower than {_MIN_RENAME_FLOOR.name}"
+            )
+        if read_floor < _MIN_READ_FLOOR:
+            raise AuthorityPolicyError(
+                f"authority read_risk_floor cannot be lower than {_MIN_READ_FLOOR.name}"
+            )
+
         return cls(
-            protected_paths=frozenset(data.get("protected_paths", _CORE_AUTHORITY_PATHS)),
-            protected_path_prefixes=tuple(
-                data.get("protected_path_prefixes", _CORE_AUTHORITY_PREFIXES)
-            ),
-            modify_risk_floor=coerce_risk_level(
-                data.get("modify_risk_floor", RiskLevel.R4_CRITICAL_AUTHORITY)
-            ),
-            delete_risk_floor=coerce_risk_level(
-                data.get("delete_risk_floor", RiskLevel.R4_CRITICAL_AUTHORITY)
-            ),
-            rename_risk_floor=coerce_risk_level(
-                data.get("rename_risk_floor", RiskLevel.R4_CRITICAL_AUTHORITY)
-            ),
-            read_risk_floor=coerce_risk_level(data.get("read_risk_floor", RiskLevel.R1_LOW)),
+            protected_paths=_CORE_AUTHORITY_PATHS | project_paths,
+            protected_path_prefixes=_CORE_AUTHORITY_PREFIXES + project_prefixes,
+            modify_risk_floor=modify_floor,
+            delete_risk_floor=delete_floor,
+            rename_risk_floor=rename_floor,
+            read_risk_floor=read_floor,
         )
 
     def _is_protected(self, path: str) -> bool:
