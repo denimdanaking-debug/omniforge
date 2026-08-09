@@ -15,7 +15,6 @@ _VOLATILE_FIELDS = frozenset({"timestamp", "state_snapshot_ref"})
 
 def _canonical_value(value: Any) -> Any:
     """Convert a value to a JSON-serializable canonical form."""
-    result: Any
     if value is None:
         return None
     if isinstance(value, str):
