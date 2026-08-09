@@ -10,6 +10,7 @@ from src.policy.risk import RiskLevel
 
 from .assessment import OperationType
 from .authority import AuthoritySensitivePolicy
+from .path_utils import normalize_repo_path
 from .security import SecuritySensitivePolicy
 
 
@@ -53,7 +54,11 @@ class RiskRuntimeEvent:
             raise ValueError("risk event count must be non-negative")
         if self.threshold < 1:
             raise ValueError("risk event threshold must be positive")
-        object.__setattr__(self, "affected_paths", tuple(str(p) for p in self.affected_paths))
+        object.__setattr__(
+            self,
+            "affected_paths",
+            tuple(normalize_repo_path(p) for p in self.affected_paths),
+        )
 
 
 @dataclass(frozen=True)

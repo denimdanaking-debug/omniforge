@@ -7,10 +7,12 @@ from typing import Any
 
 from src.policy.risk import RiskLevel
 
+from .architecture import ArchitectureThresholds, ArchitectureThresholdsError
 from .assessment import RiskFactor, RiskFactorCode, coerce_risk_level
 from .authority import AuthoritySensitivePolicy
 from .context_policy import RiskContextPolicy, RiskContextRequirements
 from .experimentation import ExperimentationEligibilityPolicy
+from .path_utils import PathNormalizationError, normalize_repo_path
 from .review_policy import RiskReviewPolicy, RiskReviewRequirement
 from .security import SecuritySensitivePolicy
 
@@ -67,15 +69,30 @@ class ProjectRiskPolicy:
                 raise ProjectRiskPolicyError("context_depth_minimum must be a string")
             _context_depth_rank(context_depth_minimum)
 
-        path_floors = {str(k): int(v) for k, v in data.get("path_risk_floors", {}).items()}
-        for floor_value in path_floors.values():
+        path_floors: dict[str, int] = {}
+        for raw_key, raw_value in data.get("path_risk_floors", {}).items():
+            try:
+                normalized_key = normalize_repo_path(str(raw_key))
+            except PathNormalizationError as exc:
+                raise ProjectRiskPolicyError(
+                    f"path_risk_floors key {raw_key!r} is invalid: {exc}"
+                ) from exc
+            floor_value = int(raw_value)
             coerce_risk_level(floor_value)
+            path_floors[normalized_key] = floor_value
+
+        try:
+            architecture_thresholds = ArchitectureThresholds.from_dict(
+                data.get("architecture_thresholds", {})
+            ).to_dict()
+        except ArchitectureThresholdsError as exc:
+            raise ProjectRiskPolicyError(f"invalid architecture_thresholds: {exc}") from exc
 
         return cls(
             minimum_risk=coerce_risk_level(minimum_risk) if minimum_risk is not None else None,
             authority_policy=AuthoritySensitivePolicy.from_dict(data.get("authority_policy", {})),
             security_policy=SecuritySensitivePolicy.from_dict(data.get("security_policy", {})),
-            architecture_thresholds=dict(data.get("architecture_thresholds", {})),
+            architecture_thresholds=architecture_thresholds,
             review_minimum=review_minimum,
             exploration_max_risk=coerce_risk_level(exploration_max_risk)
             if exploration_max_risk is not None
@@ -90,12 +107,12 @@ class ProjectRiskPolicy:
         current_risk: RiskLevel,
     ) -> tuple[RiskLevel, RiskFactor | None]:
         """Apply configured per-path risk floors. Returns (risk, factor_or_none)."""
+        normalized_paths = [normalize_repo_path(p) for p in paths]
         for raw_path, floor_value in sorted(self.path_risk_floors.items()):
             floor = RiskLevel(floor_value)
             if floor <= current_risk:
                 continue
-            for path in paths:
-                normalized = path.replace("\\", "/")
+            for normalized in normalized_paths:
                 if normalized == raw_path or normalized.startswith(raw_path.rstrip("/") + "/"):
                     evidence = f"project policy imposes risk floor {floor.name} for path {raw_path}"
                     return floor, RiskFactor(

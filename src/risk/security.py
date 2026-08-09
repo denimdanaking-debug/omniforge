@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 from typing import Any
 
 from src.policy.risk import RiskLevel
 
 from .assessment import RiskFactor, RiskFactorCode, coerce_risk_level
+from .path_utils import normalize_repo_path
 
 # Canonical security-sensitive surfaces. These are explicit path-based rules,
 # not text-pattern heuristics, to avoid false positives on ordinary code words.
@@ -36,19 +36,6 @@ _DEFAULT_SECURITY_PREFIXES: tuple[str, ...] = (
 # Core safety floor for security-sensitive changes. Project policy may raise it
 # but never lower it.
 _MIN_SECURITY_FLOOR = RiskLevel.R3_HIGH
-
-
-def _normalize_repo_path(path: str) -> str:
-    """Return a deterministic repo-relative path string."""
-    p = PurePosixPath(path)
-    parts: list[str] = []
-    for part in p.parts:
-        if part == "..":
-            if parts:
-                parts.pop()
-        elif part != "." and part != "/":
-            parts.append(part)
-    return "/".join(parts)
 
 
 class SecurityPolicyError(ValueError):
@@ -92,15 +79,23 @@ class SecuritySensitivePolicy:
             default_risk_floor=floor,
         )
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the policy to a normalized dict."""
+        return {
+            "sensitive_paths": sorted(self.sensitive_paths),
+            "sensitive_path_prefixes": list(self.sensitive_path_prefixes),
+            "default_risk_floor": self.default_risk_floor.value,
+        }
+
     def _is_sensitive(self, path: str) -> bool:
-        normalized = _normalize_repo_path(path)
+        normalized = normalize_repo_path(path)
         if normalized in self.sensitive_paths:
             return True
         return any(normalized.startswith(prefix) for prefix in self.sensitive_path_prefixes)
 
     def assess(self, paths: tuple[str, ...]) -> RiskFactor | None:
         """Return a risk factor if any security-sensitive surface is touched."""
-        touched = [_normalize_repo_path(p) for p in paths if self._is_sensitive(p)]
+        touched = [normalize_repo_path(p) for p in paths if self._is_sensitive(p)]
         if not touched:
             return None
         return RiskFactor(

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from src.policy.risk import RiskLevel
 from src.risk import ArchitectureImpactDetector, ArchitectureThresholds, RiskFactorCode
+from src.risk.architecture import ArchitectureThresholdsError
 
 
 def test_central_abstraction_change_is_architectural() -> None:
@@ -117,3 +120,47 @@ def test_large_generated_lockfile_is_not_architectural() -> None:
     paths = ("uv.lock",)
     factor = detector.detect(paths, 5000, ("uv.lock",))
     assert factor is None
+
+
+def test_negative_file_threshold_rejected() -> None:
+    with pytest.raises(ArchitectureThresholdsError):
+        ArchitectureThresholds.from_dict({"file_count_risk_floor": -1})
+
+
+def test_zero_subsystem_threshold_rejected() -> None:
+    with pytest.raises(ArchitectureThresholdsError):
+        ArchitectureThresholds.from_dict({"subsystem_risk_floor": 0})
+
+
+def test_non_integer_threshold_rejected() -> None:
+    with pytest.raises(ArchitectureThresholdsError):
+        ArchitectureThresholds.from_dict({"line_count_risk_floor": "many"})
+
+
+def test_project_threshold_cannot_weaken_default() -> None:
+    # Default file-count floor is 6; configuring 50 must not weaken it.
+    thresholds = ArchitectureThresholds.from_dict({"file_count_risk_floor": 50})
+    assert thresholds.file_count_risk_floor == 6
+
+
+def test_project_threshold_tightens_default() -> None:
+    # Configuring 4 triggers sooner than default 6.
+    thresholds = ArchitectureThresholds.from_dict({"file_count_risk_floor": 4})
+    assert thresholds.file_count_risk_floor == 4
+
+
+def test_project_architecture_risk_below_core_rejected() -> None:
+    with pytest.raises(ArchitectureThresholdsError):
+        ArchitectureThresholds.from_dict({"central_abstraction_risk_level": RiskLevel.R1_LOW})
+
+
+def test_project_architecture_risk_above_core_accepted() -> None:
+    thresholds = ArchitectureThresholds.from_dict(
+        {"central_abstraction_risk_level": RiskLevel.R4_CRITICAL_AUTHORITY}
+    )
+    assert thresholds.central_abstraction_risk_level == RiskLevel.R4_CRITICAL_AUTHORITY
+
+
+def test_unknown_architecture_field_rejected() -> None:
+    with pytest.raises(ArchitectureThresholdsError):
+        ArchitectureThresholds.from_dict({"unknown_field": 1})

@@ -16,7 +16,7 @@ from .assessment import (
 )
 from .authority import AuthoritySensitivePolicy
 from .explanation import format_explanation
-from .fingerprint import risk_assessment_fingerprint
+from .fingerprint import RiskDecisionInputs, risk_assessment_fingerprint
 from .project_policy import ProjectRiskPolicy
 from .runtime import RiskRuntimeEvent, RuntimeRiskEscalator
 from .security import SecuritySensitivePolicy
@@ -119,7 +119,15 @@ class InitialRiskClassifier:
         # Final determinism: sort factors by code and evidence for stable output.
         factors = sorted(factors, key=lambda f: (f.code.value, f.evidence))
 
-        fingerprint = risk_assessment_fingerprint(request)
+        decision_inputs = RiskDecisionInputs(
+            request=request,
+            project_policy=self.project_policy,
+            authority_policy=self.authority_policy,
+            security_policy=self.security_policy,
+            architecture_thresholds=self.architecture_detector._thresholds,
+            runtime_escalator=self.runtime_escalator,
+        )
+        fingerprint = risk_assessment_fingerprint(decision_inputs)
         explanation = format_explanation(
             RiskAssessmentResult(
                 baseline_risk=self._baseline_risk(request, paths, operation),

@@ -124,7 +124,25 @@ def test_risk_explanation_has_no_hidden_reasoning() -> None:
 
 
 def test_runtime_events_affect_input_fingerprint() -> None:
-    from src.risk import risk_assessment_fingerprint
+    from src.risk import (
+        ArchitectureThresholds,
+        AuthoritySensitivePolicy,
+        ProjectRiskPolicy,
+        RiskDecisionInputs,
+        RuntimeRiskEscalator,
+        SecuritySensitivePolicy,
+        risk_assessment_fingerprint,
+    )
+
+    def _inputs(request: RiskAssessmentRequest) -> RiskDecisionInputs:
+        return RiskDecisionInputs(
+            request=request,
+            project_policy=ProjectRiskPolicy.default(),
+            authority_policy=AuthoritySensitivePolicy.default(),
+            security_policy=SecuritySensitivePolicy.default(),
+            architecture_thresholds=ArchitectureThresholds.default(),
+            runtime_escalator=RuntimeRiskEscalator.default(),
+        )
 
     base = RiskAssessmentRequest(
         project_id="p",
@@ -149,4 +167,6 @@ def test_runtime_events_affect_input_fingerprint() -> None:
     )
     # Runtime events are decision inputs because they can change final_risk,
     # so the fingerprint must differ when they differ.
-    assert risk_assessment_fingerprint(base) != risk_assessment_fingerprint(with_event)
+    assert risk_assessment_fingerprint(_inputs(base)) != risk_assessment_fingerprint(
+        _inputs(with_event)
+    )

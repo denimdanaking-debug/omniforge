@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 from typing import Any
 
 from src.policy.risk import RiskLevel
 
 from .assessment import OperationType, RiskFactor, RiskFactorCode, coerce_risk_level
+from .path_utils import normalize_repo_path
 
 # Immutable core authority surfaces. These protect the authoritative roadmap
 # and project state regardless of project configuration.
@@ -31,19 +31,6 @@ _MIN_MODIFY_FLOOR = RiskLevel.R4_CRITICAL_AUTHORITY
 _MIN_DELETE_FLOOR = RiskLevel.R4_CRITICAL_AUTHORITY
 _MIN_RENAME_FLOOR = RiskLevel.R4_CRITICAL_AUTHORITY
 _MIN_READ_FLOOR = RiskLevel.R0_TRIVIAL
-
-
-def _normalize_repo_path(path: str) -> str:
-    """Return a deterministic repo-relative path string."""
-    p = PurePosixPath(path)
-    parts: list[str] = []
-    for part in p.parts:
-        if part == "..":
-            if parts:
-                parts.pop()
-        elif part != "." and part != "/":
-            parts.append(part)
-    return "/".join(parts)
 
 
 class AuthorityPolicyError(ValueError):
@@ -115,8 +102,19 @@ class AuthoritySensitivePolicy:
             read_risk_floor=read_floor,
         )
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the policy to a normalized dict."""
+        return {
+            "protected_paths": sorted(self.protected_paths),
+            "protected_path_prefixes": list(self.protected_path_prefixes),
+            "modify_risk_floor": self.modify_risk_floor.value,
+            "delete_risk_floor": self.delete_risk_floor.value,
+            "rename_risk_floor": self.rename_risk_floor.value,
+            "read_risk_floor": self.read_risk_floor.value,
+        }
+
     def _is_protected(self, path: str) -> bool:
-        normalized = _normalize_repo_path(path)
+        normalized = normalize_repo_path(path)
         if normalized in self.protected_paths:
             return True
         return any(normalized.startswith(prefix) for prefix in self.protected_path_prefixes)
@@ -130,7 +128,7 @@ class AuthoritySensitivePolicy:
                 op = OperationType.MODIFY
         else:
             op = operation
-        touched = [_normalize_repo_path(p) for p in paths if self._is_protected(p)]
+        touched = [normalize_repo_path(p) for p in paths if self._is_protected(p)]
         if not touched:
             return None
 

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 from typing import Any
 
 from src.policy.risk import RiskLevel
 
 from .assessment import RiskFactor, RiskFactorCode, coerce_risk_level
+from .path_utils import normalize_repo_path
 
 # Paths that represent central abstractions or public interfaces. A small change
 # here can have broad impact.
@@ -57,17 +57,26 @@ class ArchitectureImpact:
     generated_only: bool
 
 
+# Core architectural safety defaults. Project configuration may tighten these
+# (lower numeric thresholds trigger sooner; higher risk levels escalate further)
+# but may not weaken them.
+_CORE_SUBSYSTEM_FLOOR = 3
+_CORE_FILE_COUNT_FLOOR = 6
+_CORE_LINE_COUNT_FLOOR = 500
+_CORE_ARCHITECTURE_RISK_LEVEL = RiskLevel.R3_HIGH
+
+
 @dataclass(frozen=True)
 class ArchitectureThresholds:
     """Configurable thresholds for architectural risk escalation."""
 
-    subsystem_risk_floor: int = 3
-    file_count_risk_floor: int = 6
-    line_count_risk_floor: int = 500
-    central_abstraction_risk_level: RiskLevel = RiskLevel.R3_HIGH
-    public_interface_risk_level: RiskLevel = RiskLevel.R3_HIGH
-    persistence_schema_risk_level: RiskLevel = RiskLevel.R3_HIGH
-    broad_change_risk_level: RiskLevel = RiskLevel.R3_HIGH
+    subsystem_risk_floor: int = _CORE_SUBSYSTEM_FLOOR
+    file_count_risk_floor: int = _CORE_FILE_COUNT_FLOOR
+    line_count_risk_floor: int = _CORE_LINE_COUNT_FLOOR
+    central_abstraction_risk_level: RiskLevel = _CORE_ARCHITECTURE_RISK_LEVEL
+    public_interface_risk_level: RiskLevel = _CORE_ARCHITECTURE_RISK_LEVEL
+    persistence_schema_risk_level: RiskLevel = _CORE_ARCHITECTURE_RISK_LEVEL
+    broad_change_risk_level: RiskLevel = _CORE_ARCHITECTURE_RISK_LEVEL
 
     @classmethod
     def default(cls) -> ArchitectureThresholds:
@@ -75,41 +84,103 @@ class ArchitectureThresholds:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ArchitectureThresholds:
-        return cls(
-            subsystem_risk_floor=int(data.get("subsystem_risk_floor", 3)),
-            file_count_risk_floor=int(data.get("file_count_risk_floor", 6)),
-            line_count_risk_floor=int(data.get("line_count_risk_floor", 500)),
-            central_abstraction_risk_level=coerce_risk_level(
-                data.get("central_abstraction_risk_level", RiskLevel.R3_HIGH)
-            ),
-            public_interface_risk_level=coerce_risk_level(
-                data.get("public_interface_risk_level", RiskLevel.R3_HIGH)
-            ),
-            persistence_schema_risk_level=coerce_risk_level(
-                data.get("persistence_schema_risk_level", RiskLevel.R3_HIGH)
-            ),
-            broad_change_risk_level=coerce_risk_level(
-                data.get("broad_change_risk_level", RiskLevel.R3_HIGH)
-            ),
+        """Build thresholds that tighten the core defaults.
+
+        Lower numeric thresholds are stricter because they trigger architectural
+        classification sooner. Higher risk levels are stricter because they
+        escalate further. Project values below core safety floors are rejected.
+        """
+        allowed = {
+            "subsystem_risk_floor",
+            "file_count_risk_floor",
+            "line_count_risk_floor",
+            "central_abstraction_risk_level",
+            "public_interface_risk_level",
+            "persistence_schema_risk_level",
+            "broad_change_risk_level",
+        }
+        unknown = set(data.keys()) - allowed
+        if unknown:
+            raise ArchitectureThresholdsError(
+                f"unknown architecture_thresholds fields: {sorted(unknown)}"
+            )
+
+        def _positive_int(value: Any, name: str) -> int:
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ArchitectureThresholdsError(
+                    f"{name} must be a positive integer, got {value!r}"
+                )
+            if value <= 0:
+                raise ArchitectureThresholdsError(f"{name} must be positive, got {value}")
+            return value
+
+        subsystem_floor = _positive_int(
+            data.get("subsystem_risk_floor", _CORE_SUBSYSTEM_FLOOR),
+            "subsystem_risk_floor",
+        )
+        file_count_floor = _positive_int(
+            data.get("file_count_risk_floor", _CORE_FILE_COUNT_FLOOR),
+            "file_count_risk_floor",
+        )
+        line_count_floor = _positive_int(
+            data.get("line_count_risk_floor", _CORE_LINE_COUNT_FLOOR),
+            "line_count_risk_floor",
         )
 
+        central_level = coerce_risk_level(
+            data.get("central_abstraction_risk_level", _CORE_ARCHITECTURE_RISK_LEVEL)
+        )
+        public_level = coerce_risk_level(
+            data.get("public_interface_risk_level", _CORE_ARCHITECTURE_RISK_LEVEL)
+        )
+        persistence_level = coerce_risk_level(
+            data.get("persistence_schema_risk_level", _CORE_ARCHITECTURE_RISK_LEVEL)
+        )
+        broad_level = coerce_risk_level(
+            data.get("broad_change_risk_level", _CORE_ARCHITECTURE_RISK_LEVEL)
+        )
 
-def _normalize_repo_path(path: str) -> str:
-    """Return a deterministic repo-relative path string."""
-    p = PurePosixPath(path)
-    parts: list[str] = []
-    for part in p.parts:
-        if part == "..":
-            if parts:
-                parts.pop()
-        elif part != "." and part != "/":
-            parts.append(part)
-    return "/".join(parts)
+        for name, level in (
+            ("central_abstraction_risk_level", central_level),
+            ("public_interface_risk_level", public_level),
+            ("persistence_schema_risk_level", persistence_level),
+            ("broad_change_risk_level", broad_level),
+        ):
+            if level < _CORE_ARCHITECTURE_RISK_LEVEL:
+                raise ArchitectureThresholdsError(
+                    f"{name} cannot be lower than {_CORE_ARCHITECTURE_RISK_LEVEL.name}"
+                )
+
+        return cls(
+            subsystem_risk_floor=min(_CORE_SUBSYSTEM_FLOOR, subsystem_floor),
+            file_count_risk_floor=min(_CORE_FILE_COUNT_FLOOR, file_count_floor),
+            line_count_risk_floor=min(_CORE_LINE_COUNT_FLOOR, line_count_floor),
+            central_abstraction_risk_level=central_level,
+            public_interface_risk_level=public_level,
+            persistence_schema_risk_level=persistence_level,
+            broad_change_risk_level=broad_level,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize thresholds to a normalized dict."""
+        return {
+            "subsystem_risk_floor": self.subsystem_risk_floor,
+            "file_count_risk_floor": self.file_count_risk_floor,
+            "line_count_risk_floor": self.line_count_risk_floor,
+            "central_abstraction_risk_level": self.central_abstraction_risk_level.value,
+            "public_interface_risk_level": self.public_interface_risk_level.value,
+            "persistence_schema_risk_level": self.persistence_schema_risk_level.value,
+            "broad_change_risk_level": self.broad_change_risk_level.value,
+        }
+
+
+class ArchitectureThresholdsError(ValueError):
+    """Raised when architecture threshold configuration violates safety rules."""
 
 
 def _subsystem_for(path: str) -> str:
     """Return the top-level subsystem name for a path."""
-    normalized = _normalize_repo_path(path)
+    normalized = normalize_repo_path(path)
     parts = normalized.split("/")
     if len(parts) >= 2 and parts[0] == "src":
         return parts[1]
@@ -135,30 +206,23 @@ class ArchitectureImpactDetector:
         generated_files: tuple[str, ...],
     ) -> RiskFactor | None:
         """Return a risk factor if the change appears broadly architectural."""
-        non_generated = [
-            _normalize_repo_path(p) for p in paths if _normalize_repo_path(p) not in generated_files
-        ]
+        normalized_paths = [normalize_repo_path(p) for p in paths]
+        normalized_generated = {normalize_repo_path(p) for p in generated_files}
+        non_generated = [p for p in normalized_paths if p not in normalized_generated]
         generated_only = len(non_generated) == 0 and len(paths) > 0
 
         subsystems = sorted({_subsystem_for(p) for p in non_generated if _subsystem_for(p)})
         subsystem_count = len(subsystems)
 
         central_abstraction_changed = any(
-            any(
-                _normalize_repo_path(p).startswith(prefix)
-                for prefix in _CENTRAL_ABSTRACTION_PREFIXES
-            )
+            any(p.startswith(prefix) for prefix in _CENTRAL_ABSTRACTION_PREFIXES)
             for p in non_generated
         )
         public_interface_changed = any(
-            _normalize_repo_path(p).startswith(pattern)
-            for p in non_generated
-            for pattern in _PUBLIC_INTERFACE_PATTERNS
+            p.startswith(pattern) for p in non_generated for pattern in _PUBLIC_INTERFACE_PATTERNS
         )
         persistence_schema_changed = any(
-            _normalize_repo_path(p).startswith(pattern)
-            for p in non_generated
-            for pattern in _PERSISTENCE_SCHEMA_PATTERNS
+            p.startswith(pattern) for p in non_generated for pattern in _PERSISTENCE_SCHEMA_PATTERNS
         )
         cross_package_dependency_change = subsystem_count >= self._thresholds.subsystem_risk_floor
 

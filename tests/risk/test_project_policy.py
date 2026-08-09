@@ -154,3 +154,49 @@ def test_to_dict_round_trip() -> None:
     assert data["review_minimum"] == 2
     assert data["exploration_max_risk"] == 1
     assert data["context_depth_minimum"] == "hybrid"
+
+
+def test_path_floor_normalizes_dotted_input() -> None:
+    policy = ProjectRiskPolicy(path_risk_floors={"src/security": 3})
+    risk, factor = policy.apply_floor(("./src/security/secrets.py",), RiskLevel.R1_LOW)
+    assert risk == RiskLevel.R3_HIGH
+    assert factor is not None
+
+
+def test_path_floor_normalizes_dotdot_input() -> None:
+    policy = ProjectRiskPolicy(path_risk_floors={"src/security": 3})
+    risk, factor = policy.apply_floor(("src/foo/../security/secrets.py",), RiskLevel.R1_LOW)
+    assert risk == RiskLevel.R3_HIGH
+    assert factor is not None
+
+
+def test_path_floor_normalizes_backslash_input() -> None:
+    policy = ProjectRiskPolicy(path_risk_floors={"src/security": 3})
+    risk, factor = policy.apply_floor(("src\\security\\secrets.py",), RiskLevel.R1_LOW)
+    assert risk == RiskLevel.R3_HIGH
+    assert factor is not None
+
+
+def test_path_floor_normalizes_configured_key() -> None:
+    policy = ProjectRiskPolicy.from_dict({"path_risk_floors": {"./src/security/": 3}})
+    assert "src/security" in policy.path_risk_floors
+    risk, factor = policy.apply_floor(("src/security/secrets.py",), RiskLevel.R1_LOW)
+    assert risk == RiskLevel.R3_HIGH
+    assert factor is not None
+
+
+def test_path_floor_rejects_root_escape_input() -> None:
+    policy = ProjectRiskPolicy(path_risk_floors={"src/security": 3})
+    with pytest.raises(ValueError):
+        policy.apply_floor(("../../outside/file.py",), RiskLevel.R1_LOW)
+
+
+def test_path_floor_rejects_root_escape_key() -> None:
+    with pytest.raises(ValueError):
+        ProjectRiskPolicy.from_dict({"path_risk_floors": {"../../outside": 3}})
+
+
+def test_same_logical_floor_configuration_is_deterministic() -> None:
+    p1 = ProjectRiskPolicy.from_dict({"path_risk_floors": {"./src/security/": 3}})
+    p2 = ProjectRiskPolicy.from_dict({"path_risk_floors": {"src/security": 3}})
+    assert p1.path_risk_floors == p2.path_risk_floors

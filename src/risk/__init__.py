@@ -16,7 +16,7 @@ from .context_policy import RiskContextPolicy, RiskContextRequirements
 from .eligibility import RiskEligibilityConnector, RiskRoutingIntegration
 from .experimentation import ExperimentationEligibility, ExperimentationEligibilityPolicy
 from .explanation import RiskExplanation, format_explanation
-from .fingerprint import risk_assessment_fingerprint
+from .fingerprint import RiskDecisionInputs, risk_assessment_fingerprint
 from .project_policy import ProjectRiskPolicy
 from .review_policy import RiskReviewPolicy, RiskReviewRequirement
 from .runtime import (
@@ -40,6 +40,7 @@ __all__ = [
     "RiskAssessmentRequest",
     "RiskAssessmentResult",
     "RiskClassificationError",
+    "RiskDecisionInputs",
     "RiskContextPolicy",
     "RiskContextRequirements",
     "RiskEligibilityConnector",
