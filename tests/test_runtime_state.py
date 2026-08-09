@@ -13,10 +13,13 @@ class RuntimeStateVersioningTests(unittest.TestCase):
         runtime_state.register_runtime_migration("1.0.0", "1.1.0")(
             runtime_state._migrate_runtime_1_0_0_to_1_1_0
         )
+        runtime_state.register_runtime_migration("1.1.0", "1.2.0")(
+            runtime_state._migrate_runtime_1_1_0_to_1_2_0
+        )
 
     def valid_state(self) -> dict:
         return {
-            "schema_version": "1.1.0",
+            "schema_version": "1.2.0",
             "run_id": "run-123",
             "workflow_state": "EXECUTING",
             "checkpoint": {"phase": "0", "step": "0.5", "task": "persist"},
@@ -30,6 +33,11 @@ class RuntimeStateVersioningTests(unittest.TestCase):
             "exploration_enabled": False,
             "pins": {},
             "project_policies": {},
+            "provider_recovery_state": {},
+            "route_recovery_state": {},
+            "failure_domain_index": {},
+            "recovery_scheduler": {},
+            "waiting_tasks": {},
         }
 
     def test_state_survives_save_and_restart_load(self) -> None:
@@ -72,7 +80,7 @@ class RuntimeStateVersioningTests(unittest.TestCase):
             "checkpoint": {},
         }
         result = runtime_state.validate_runtime_state(legacy)
-        self.assertEqual("1.1.0", result["schema_version"])
+        self.assertEqual("1.2.0", result["schema_version"])
         self.assertEqual("legacy", result["routing_mode"])
         self.assertFalse(result["exploration_enabled"])
         self.assertIn("provider_status", result)
@@ -80,6 +88,11 @@ class RuntimeStateVersioningTests(unittest.TestCase):
         self.assertIn("route_status", result)
         self.assertIn("pins", result)
         self.assertIn("project_policies", result)
+        self.assertIn("provider_recovery_state", result)
+        self.assertIn("route_recovery_state", result)
+        self.assertIn("failure_domain_index", result)
+        self.assertIn("recovery_scheduler", result)
+        self.assertIn("waiting_tasks", result)
 
     def test_explicit_migration_is_applied(self) -> None:
         @runtime_state.register_runtime_migration("0.9.0", "1.0.0")
@@ -91,7 +104,7 @@ class RuntimeStateVersioningTests(unittest.TestCase):
         result = runtime_state.validate_runtime_state(
             {"schema_version": "0.9.0", "run_id": "legacy"}
         )
-        self.assertEqual("1.1.0", result["schema_version"])
+        self.assertEqual("1.2.0", result["schema_version"])
         self.assertEqual("STOPPED", result["workflow_state"])
 
     def test_migration_cycle_is_rejected(self) -> None:

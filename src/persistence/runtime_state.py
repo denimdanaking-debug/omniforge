@@ -14,7 +14,7 @@ from typing import Any
 from src.security.redaction import redact
 from src.security.secrets import SecretValue
 
-CURRENT_RUNTIME_STATE_VERSION = "1.1.0"
+CURRENT_RUNTIME_STATE_VERSION = "1.2.0"
 RuntimeMigration = Callable[[dict[str, Any]], dict[str, Any]]
 _RUNTIME_MIGRATIONS: dict[str, tuple[str, RuntimeMigration]] = {}
 
@@ -86,6 +86,22 @@ def _migrate_runtime_1_0_0_to_1_1_0(old: dict[str, Any]) -> dict[str, Any]:
     working.setdefault("exploration_enabled", False)
     working.setdefault("pins", {})
     working.setdefault("project_policies", {})
+    return working
+
+
+@register_runtime_migration("1.1.0", "1.2.0")
+def _migrate_runtime_1_1_0_to_1_2_0(old: dict[str, Any]) -> dict[str, Any]:
+    """Add Phase 6 recovery engine fields with conservative defaults.
+
+    Unknown providers/routes are NOT marked healthy. They enter DEGRADED until
+    observed, preserving Phase 3's conservative health semantics.
+    """
+    working = copy.deepcopy(old)
+    working.setdefault("provider_recovery_state", {})
+    working.setdefault("route_recovery_state", {})
+    working.setdefault("failure_domain_index", {})
+    working.setdefault("recovery_scheduler", {})
+    working.setdefault("waiting_tasks", {})
     return working
 
 
@@ -192,6 +208,132 @@ def _validate_project_policies(value: Any) -> None:
         )
 
 
+def _validate_recovery_state_map(path: str, value: Any) -> None:
+    if not isinstance(value, dict):
+        raise CorruptRuntimeState(
+            RuntimeStateDiagnostic("INVALID_RECOVERY_STATE_MAP", f"{path} must be an object")
+        )
+    for key, entry in value.items():
+        if not isinstance(key, str) or not key:
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_RECOVERY_KEY", f"{path} keys must be non-empty strings"
+                )
+            )
+        if not isinstance(entry, dict):
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic("INVALID_RECOVERY_ENTRY", f"{path}.{key} must be an object")
+            )
+        health = entry.get("health")
+        if not isinstance(health, str):
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_RECOVERY_HEALTH", f"{path}.{key}.health must be a string"
+                )
+            )
+        consecutive = entry.get("consecutive_failures", 0)
+        if not isinstance(consecutive, int) or consecutive < 0:
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_RECOVERY_FAILURES",
+                    f"{path}.{key}.consecutive_failures must be a non-negative integer",
+                )
+            )
+        for field_name in (
+            "last_success_at",
+            "last_failure_at",
+            "cooldown_until",
+            "next_recheck_at",
+            "quota_reset_at",
+        ):
+            field_value = entry.get(field_name)
+            if field_value is not None and not isinstance(field_value, str):
+                raise CorruptRuntimeState(
+                    RuntimeStateDiagnostic(
+                        "INVALID_RECOVERY_TIMESTAMP",
+                        f"{path}.{key}.{field_name} must be a string or null",
+                    )
+                )
+
+
+def _validate_failure_domain_index(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise CorruptRuntimeState(
+            RuntimeStateDiagnostic(
+                "INVALID_FAILURE_DOMAIN_INDEX", "failure_domain_index must be an object"
+            )
+        )
+    for domain, route_ids in value.items():
+        if not isinstance(domain, str) or not domain:
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_FAILURE_DOMAIN", "failure_domain keys must be non-empty strings"
+                )
+            )
+        if not isinstance(route_ids, list):
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_FAILURE_DOMAIN_ROUTES", f"failure_domain {domain!r} must map to a list"
+                )
+            )
+        for route_id in route_ids:
+            if not isinstance(route_id, str) or not route_id:
+                raise CorruptRuntimeState(
+                    RuntimeStateDiagnostic(
+                        "INVALID_FAILURE_DOMAIN_ROUTE_ID", "route ids must be non-empty strings"
+                    )
+                )
+
+
+def _validate_scheduler(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise CorruptRuntimeState(
+            RuntimeStateDiagnostic("INVALID_SCHEDULER", "recovery_scheduler must be an object")
+        )
+    for route_id, due_at in value.items():
+        if not isinstance(route_id, str) or not route_id:
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_SCHEDULER_ROUTE_ID", "scheduler keys must be non-empty strings"
+                )
+            )
+        if not isinstance(due_at, str):
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_SCHEDULER_TIME",
+                    f"scheduler {route_id!r} must map to an ISO timestamp string",
+                )
+            )
+
+
+def _validate_waiting_tasks(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise CorruptRuntimeState(
+            RuntimeStateDiagnostic("INVALID_WAITING_TASKS", "waiting_tasks must be an object")
+        )
+    for task_id, task in value.items():
+        if not isinstance(task_id, str) or not task_id:
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_WAITING_TASK_ID", "waiting_tasks keys must be non-empty strings"
+                )
+            )
+        if not isinstance(task, dict):
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_WAITING_TASK", f"waiting_tasks.{task_id} must be an object"
+                )
+            )
+        for required in ("task_id", "role", "reason", "next_recheck_at"):
+            if required not in task:
+                raise CorruptRuntimeState(
+                    RuntimeStateDiagnostic(
+                        "MISSING_WAITING_TASK_FIELD",
+                        f"waiting_tasks.{task_id} missing {required}",
+                    )
+                )
+
+
 def validate_runtime_state(state: Mapping[str, Any]) -> dict[str, Any]:
     working = migrate_runtime_state(state)
 
@@ -235,6 +377,15 @@ def validate_runtime_state(state: Mapping[str, Any]) -> dict[str, Any]:
     _validate_status_map("route_status", working.get("route_status", {}))
     _validate_pins(working.get("pins", {}))
     _validate_project_policies(working.get("project_policies", {}))
+
+    # Phase 6 recovery engine state.
+    _validate_recovery_state_map(
+        "provider_recovery_state", working.get("provider_recovery_state", {})
+    )
+    _validate_recovery_state_map("route_recovery_state", working.get("route_recovery_state", {}))
+    _validate_failure_domain_index(working.get("failure_domain_index", {}))
+    _validate_scheduler(working.get("recovery_scheduler", {}))
+    _validate_waiting_tasks(working.get("waiting_tasks", {}))
 
     return working
 
