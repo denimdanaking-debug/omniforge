@@ -82,16 +82,17 @@ def test_config_migration_adds_router_config() -> None:
         "project_policies": {},
     }
     result = configuration.validate_config(config)
-    assert result["schema_version"] == "1.3.0"
+    assert result["schema_version"] == "1.4.0"
     assert "router_config" in result
     assert "factor_weights" in result["router_config"]
     assert "priors" in result["router_config"]
     assert "risk_policy" in result
+    assert "recovery_policy" in result
 
 
 def test_extract_router_config_from_admin_state() -> None:
     config = {
-        "schema_version": "1.3.0",
+        "schema_version": "1.4.0",
         "routing_mode": "dynamic",
         "exploration_enabled": False,
         "providers": {"openai": {"enabled": True, "models": {}, "routes": {}}},
@@ -99,6 +100,7 @@ def test_extract_router_config_from_admin_state() -> None:
         "project_policies": {},
         "router_config": {"default_safety_margin_fraction": 0.2},
         "risk_policy": {},
+        "recovery_policy": {},
     }
     admin = configuration.extract_administrative_state(config)
     router_cfg = configuration.extract_router_config(admin)
@@ -107,7 +109,7 @@ def test_extract_router_config_from_admin_state() -> None:
 
 def test_invalid_router_config_in_config_rejected() -> None:
     config = {
-        "schema_version": "1.3.0",
+        "schema_version": "1.4.0",
         "routing_mode": "legacy",
         "exploration_enabled": False,
         "providers": {"openai": {"enabled": True, "models": {}, "routes": {}}},
@@ -115,6 +117,7 @@ def test_invalid_router_config_in_config_rejected() -> None:
         "project_policies": {},
         "router_config": {"factor_weights": {"cost": -1.0}},
         "risk_policy": {},
+        "recovery_policy": {},
     }
     with pytest.raises(configuration.InvalidConfiguration):
         configuration.validate_config(config)

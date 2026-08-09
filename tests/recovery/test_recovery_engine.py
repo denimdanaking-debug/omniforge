@@ -903,17 +903,18 @@ class TestRuntimeStateRecovery:
             "project_policies": {},
         }
         result = runtime_state.validate_runtime_state(old)
-        assert result["schema_version"] == "1.3.0"
+        assert result["schema_version"] == "1.4.0"
         assert result["provider_recovery_state"] == {}
         assert result["route_recovery_state"] == {}
         assert result["failure_domain_index"] == {}
         assert result["recovery_scheduler"] == {}
         assert result["waiting_tasks"] == {}
         assert result["task_risk_state"] == {}
+        assert result["task_retry_state"] == {}
 
     def test_runtime_state_validates_recovery_state_health(self) -> None:
         state = {
-            "schema_version": "1.3.0",
+            "schema_version": "1.4.0",
             "run_id": "run-1",
             "workflow_state": "WAITING_FOR_PROVIDER",
             "checkpoint": {},
@@ -940,6 +941,7 @@ class TestRuntimeStateRecovery:
             "recovery_scheduler": {},
             "waiting_tasks": {},
             "task_risk_state": {},
+            "task_retry_state": {},
         }
         with pytest.raises(runtime_state.CorruptRuntimeState) as caught:
             runtime_state.validate_runtime_state(state)
@@ -973,7 +975,7 @@ class TestRuntimeStateRecovery:
             next_recheck_at=datetime.datetime(2026, 1, 2, tzinfo=datetime.UTC),
         )
         state = {
-            "schema_version": "1.3.0",
+            "schema_version": "1.4.0",
             "run_id": "run-1",
             "workflow_state": "WAITING_FOR_PROVIDER",
             "checkpoint": {"task_id": "task-42"},
@@ -990,6 +992,7 @@ class TestRuntimeStateRecovery:
             "recovery_scheduler": {},
             "waiting_tasks": {"task-42": wait.to_dict()},
             "task_risk_state": {},
+            "task_retry_state": {},
         }
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "runtime.json"
@@ -1056,7 +1059,7 @@ class TestOutageSurvivalEndToEnd:
             next_recheck_at=decision.wait.next_recheck_at,
         )
         state = {
-            "schema_version": "1.3.0",
+            "schema_version": "1.4.0",
             "run_id": "run-1",
             "workflow_state": "WAITING_FOR_PROVIDER",
             "checkpoint": {"phase": "6", "step": "6.5", "task_id": "task-123"},
@@ -1078,6 +1081,7 @@ class TestOutageSurvivalEndToEnd:
             "recovery_scheduler": {},
             "waiting_tasks": {"task-123": wait.to_dict()},
             "task_risk_state": {},
+            "task_retry_state": {},
         }
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "runtime.json"
