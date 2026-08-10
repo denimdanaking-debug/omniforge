@@ -26,6 +26,7 @@ from src.performance.event import (
     RepairMetadata,
     Usage,
     event_identity,
+    performance_event_fingerprint,
 )
 from src.performance.ledger import PerformanceLedger
 from src.performance.persistence import (
@@ -36,12 +37,14 @@ from src.performance.persistence import (
 from src.performance.statistics import (
     ContextStrategyStatistics,
     LanguageFrameworkStatistics,
+    ModelRoleDimensionalStatistics,
     ModelRoleStatistics,
     PerformanceStatisticsBundle,
     ProjectPerformanceStatistics,
     ReviewerStatistics,
     RiskDifficultyStatistics,
     RouteStatistics,
+    TaskLifecycleStatistics,
     safe_rate,
 )
 
@@ -63,17 +66,20 @@ __all__ = [
     "RepairMetadata",
     "Usage",
     "event_identity",
+    "performance_event_fingerprint",
     "PerformanceLedger",
     "CURRENT_PERFORMANCE_SCHEMA_VERSION",
     "performance_state_from_dict",
     "performance_state_to_dict",
     "ContextStrategyStatistics",
     "LanguageFrameworkStatistics",
+    "ModelRoleDimensionalStatistics",
     "ModelRoleStatistics",
     "PerformanceStatisticsBundle",
     "ProjectPerformanceStatistics",
     "ReviewerStatistics",
     "RiskDifficultyStatistics",
     "RouteStatistics",
+    "TaskLifecycleStatistics",
     "safe_rate",
 ]

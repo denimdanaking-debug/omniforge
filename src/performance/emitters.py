@@ -71,24 +71,6 @@ def _base_event(
         outcome_category=outcome_category,
         sequence=sequence,
     )
-    evidence_refs = kwargs.get("evidence_refs", ())
-    originating_ids = kwargs.get("originating_ids", {})
-    fingerprint_payload = {
-        "event_id": event_id,
-        "event_type": event_type.value,
-        "outcome_category": outcome_category.value
-        if hasattr(outcome_category, "value")
-        else str(outcome_category),
-        "model_id": model_id,
-        "provider_id": provider_id,
-        "route_id": route_id,
-        "execution_role": execution_role,
-        "task_class": task_class,
-        "risk": risk,
-        "acceptance_status": kwargs.get("acceptance_status", AcceptanceStatus.PENDING).value,
-        "first_pass": kwargs.get("first_pass"),
-    }
-    event_fingerprint = _dict_fingerprint(fingerprint_payload)
     return PerformanceEvent(
         event_id=event_id,
         schema_version=CURRENT_EVENT_SCHEMA,
@@ -103,19 +85,8 @@ def _base_event(
         provider_id=provider_id,
         model_id=model_id,
         route_id=route_id,
-        event_fingerprint=event_fingerprint,
         **kwargs,
-        evidence_refs=evidence_refs,
-        originating_ids=originating_ids,
     )
-
-
-def _dict_fingerprint(payload: dict[str, Any]) -> str:
-    import hashlib
-    import json
-
-    normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _outcome_category_from_task_outcome(outcome: TaskOutcome) -> OutcomeCategory:
@@ -265,12 +236,9 @@ def emit_from_recovery_decision(
     """Build a performance event from a Phase 10 recovery decision."""
     classification = decision.classification
     outcome_category = _outcome_category_from_classification(classification)
-    acceptance = (
-        AcceptanceStatus.ACCEPTED
-        if decision.action.value
-        in {"RETRY_SAME_ROUTE", "CONSTRAINED_OUTPUT_RETRY", "REPLAN", "REPAIR_WITH_EVIDENCE"}
-        else AcceptanceStatus.PENDING
-    )
+    # A recovery action is never acceptance; only canonical accepted-integration
+    # evidence may finalize acceptance.
+    acceptance = AcceptanceStatus.PENDING
     candidate = decision.selected_candidate
     provider_id = candidate.provider_id if candidate else None
     model_id = candidate.model_id if candidate else None

@@ -11,6 +11,7 @@ from src.performance import (
     Cost,
     CostState,
     OutcomeCategory,
+    PerformanceAttribution,
     PerformanceEvent,
     PerformanceEventType,
     PerformanceLedger,
@@ -25,7 +26,11 @@ def base_time() -> datetime.datetime:
     return datetime.datetime(2026, 1, 1, 0, 0, 0, tzinfo=datetime.UTC)
 
 
-def _event(event_id: str, timestamp: datetime.datetime) -> PerformanceEvent:
+def _event(
+    event_id: str,
+    timestamp: datetime.datetime,
+    attribution: str = PerformanceAttribution.MODEL_QUALITY.value,
+) -> PerformanceEvent:
     return PerformanceEvent(
         event_id=event_id,
         schema_version="1.0.0",
@@ -44,6 +49,7 @@ def _event(event_id: str, timestamp: datetime.datetime) -> PerformanceEvent:
         acceptance_status=AcceptanceStatus.ACCEPTED,
         first_pass=True,
         direct_cost=Cost(0.01, "USD", CostState.ACTUAL),
+        attribution=attribution,
     )
 
 
@@ -109,3 +115,23 @@ class TestPerformanceStateSerialization:
         state = performance_state_to_dict(ledger)
         text = str(state)
         assert "sk-live-12345" not in text
+
+    def test_stale_statistics_rebuilt_from_ledger(self, base_time: datetime.datetime) -> None:
+        event = _event("e1", base_time)
+        ledger = PerformanceLedger().append(event)
+        state = performance_state_to_dict(ledger)
+        # Corrupt the derived statistics cache.
+        state["statistics"]["total_events"] = 999
+        state["statistics"]["model_role"]["gpt-4o:coding"]["accepted"] = 999
+        restored_ledger, bundle = performance_state_from_dict(state)
+        assert restored_ledger == ledger
+        assert bundle.total_events == 1
+        assert bundle.model_role[("gpt-4o", "coding")].accepted == 1
+
+    def test_missing_statistics_rebuilt_from_ledger(self, base_time: datetime.datetime) -> None:
+        event = _event("e1", base_time)
+        ledger = PerformanceLedger().append(event)
+        state = {"ledger": ledger.to_dict()}
+        restored_ledger, bundle = performance_state_from_dict(state)
+        assert restored_ledger == ledger
+        assert bundle.total_events == 1

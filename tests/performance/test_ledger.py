@@ -33,6 +33,7 @@ def _event(
     route_id: str = "openai-direct",
     outcome_category: OutcomeCategory = OutcomeCategory.SUCCESS,
     first_pass: bool = True,
+    usage: Usage | None = None,
 ) -> PerformanceEvent:
     return PerformanceEvent(
         event_id=event_id,
@@ -51,7 +52,7 @@ def _event(
         outcome_category=outcome_category,
         acceptance_status=AcceptanceStatus.ACCEPTED,
         first_pass=first_pass,
-        usage=Usage(input_tokens=10, output_tokens=5),
+        usage=usage or Usage(input_tokens=10, output_tokens=5),
         direct_cost=Cost(0.001, "USD", CostState.ACTUAL),
     )
 
@@ -113,3 +114,30 @@ class TestPerformanceLedger:
         safe = ledger.to_safe_dict()
         assert not contains_secret(safe, sentinel)
         assert sentinel not in str(safe)
+
+    def test_from_dict_rejects_forged_fingerprint(self, base_time: datetime.datetime) -> None:
+        event = _event(event_id="e1", timestamp=base_time)
+        payload = event.to_dict()
+        payload["event_fingerprint"] = "forged"
+        with pytest.raises(ValueError, match="fingerprint mismatch"):
+            PerformanceLedger.from_dict({"schema_version": "1.0.0", "events": [payload]})
+
+    def test_from_dict_rejects_duplicate_event_ids(self, base_time: datetime.datetime) -> None:
+        payload = _event(event_id="e1", timestamp=base_time).to_dict()
+        with pytest.raises(ValueError, match="duplicate event_id"):
+            PerformanceLedger.from_dict({"schema_version": "1.0.0", "events": [payload, payload]})
+
+    def test_replay_with_same_fingerprint_is_idempotent(self, base_time: datetime.datetime) -> None:
+        event = _event(event_id="e1", timestamp=base_time)
+        ledger = PerformanceLedger().append(event)
+        reloaded = PerformanceLedger.from_dict(ledger.to_dict())
+        assert reloaded == ledger
+
+    def test_same_id_different_fingerprint_fails_closed(self, base_time: datetime.datetime) -> None:
+        e1 = _event(event_id="e1", timestamp=base_time, usage=Usage(input_tokens=1))
+        e2 = _event(event_id="e1", timestamp=base_time, usage=Usage(input_tokens=2))
+        assert e1.event_id == e2.event_id
+        assert e1.event_fingerprint != e2.event_fingerprint
+        ledger = PerformanceLedger().append(e1)
+        with pytest.raises(ValueError):
+            ledger.append(e2)

@@ -15,6 +15,7 @@ from src.performance import (
     PerformanceEventType,
     Usage,
     event_identity,
+    performance_event_fingerprint,
 )
 from src.security.redaction import contains_secret
 
@@ -81,6 +82,47 @@ class TestPerformanceEventImmutability:
         )
         safe = event.to_safe_dict()
         assert not contains_secret(safe, "sk-live-abcdef")
+
+    def test_validation_result_summary_cannot_be_mutated(
+        self, base_time: datetime.datetime
+    ) -> None:
+        event = PerformanceEvent.from_dict(
+            {
+                **_event(timestamp=base_time).to_dict(),
+                "validation_result_summary": {"exit_status": 1},
+            }
+        )
+        with pytest.raises(TypeError):
+            event.validation_result_summary["exit_status"] = 2  # type: ignore[index]
+
+    def test_review_finding_dispositions_cannot_be_mutated(
+        self, base_time: datetime.datetime
+    ) -> None:
+        from src.performance import FindingDisposition
+
+        event = PerformanceEvent.from_dict(
+            {
+                **_event(timestamp=base_time).to_dict(),
+                "review_finding_dispositions": {"f1": FindingDisposition.SUPPORTED},
+            }
+        )
+        with pytest.raises(TypeError):
+            event.review_finding_dispositions["f1"] = FindingDisposition.UNSUPPORTED  # type: ignore[index]
+
+    def test_originating_ids_cannot_be_mutated(self, base_time: datetime.datetime) -> None:
+        event = _event(timestamp=base_time)
+        with pytest.raises(TypeError):
+            event.originating_ids["extra"] = "x"  # type: ignore[index]
+
+    def test_mutating_input_dict_after_creation_does_not_affect_event(
+        self, base_time: datetime.datetime
+    ) -> None:
+        summary = {"exit_status": 1}
+        event = PerformanceEvent.from_dict(
+            {**_event(timestamp=base_time).to_dict(), "validation_result_summary": summary}
+        )
+        summary["exit_status"] = 99
+        assert event.validation_result_summary["exit_status"] == 1
 
 
 class TestEventIdentity:
@@ -156,6 +198,55 @@ class TestEventIdentity:
             sequence=1,
         )
         assert eid1 != eid2
+
+
+class TestEventFingerprint:
+    def test_fingerprint_covers_usage(self, base_time: datetime.datetime) -> None:
+        e1 = _event(event_id="e1", timestamp=base_time, usage=Usage(input_tokens=1))
+        e2 = _event(event_id="e2", timestamp=base_time, usage=Usage(input_tokens=2))
+        assert e1.event_fingerprint != e2.event_fingerprint
+
+    def test_fingerprint_covers_cost(self, base_time: datetime.datetime) -> None:
+        e1 = _event(
+            event_id="e1", timestamp=base_time, direct_cost=Cost(0.1, "USD", CostState.ACTUAL)
+        )
+        e2 = _event(
+            event_id="e2", timestamp=base_time, direct_cost=Cost(0.2, "USD", CostState.ACTUAL)
+        )
+        assert e1.event_fingerprint != e2.event_fingerprint
+
+    def test_fingerprint_covers_context_strategy(self, base_time: datetime.datetime) -> None:
+        e1 = PerformanceEvent.from_dict(
+            {**_event(event_id="e1", timestamp=base_time).to_dict(), "context_strategy": "targeted"}
+        )
+        e2 = PerformanceEvent.from_dict(
+            {**_event(event_id="e2", timestamp=base_time).to_dict(), "context_strategy": "hybrid"}
+        )
+        assert e1.event_fingerprint != e2.event_fingerprint
+
+    def test_fingerprint_covers_authority_adherence(self, base_time: datetime.datetime) -> None:
+        from src.performance import AuthorityAdherenceStatus
+
+        e1 = PerformanceEvent.from_dict(
+            {
+                **_event(event_id="e1", timestamp=base_time).to_dict(),
+                "authority_adherence": AuthorityAdherenceStatus.COMPLIANT,
+            }
+        )
+        e2 = PerformanceEvent.from_dict(
+            {
+                **_event(event_id="e2", timestamp=base_time).to_dict(),
+                "authority_adherence": AuthorityAdherenceStatus.ATTEMPTED_MUTATION,
+            }
+        )
+        assert e1.event_fingerprint != e2.event_fingerprint
+
+    def test_fingerprint_is_stable_for_identical_event(self, base_time: datetime.datetime) -> None:
+        payload = _event(event_id="e1", timestamp=base_time).to_dict()
+        e1 = PerformanceEvent.from_dict(payload)
+        e2 = PerformanceEvent.from_dict(payload)
+        assert e1.event_fingerprint == e2.event_fingerprint
+        assert performance_event_fingerprint(e1) == e1.event_fingerprint
 
 
 class TestCostAndUsage:

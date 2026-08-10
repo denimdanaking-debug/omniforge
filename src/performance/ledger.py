@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, cast
 
-from src.performance.event import PerformanceEvent
+from src.performance.event import PerformanceEvent, performance_event_fingerprint
 from src.security.redaction import redact
 
 
@@ -76,11 +76,22 @@ class PerformanceLedger:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PerformanceLedger:
-        events = tuple(
-            PerformanceEvent.from_dict(event_data) for event_data in data.get("events", [])
-        )
+        events: list[PerformanceEvent] = []
+        seen_ids: set[str] = set()
+        for event_data in data.get("events", []):
+            event = PerformanceEvent.from_dict(event_data)
+            if event.event_id in seen_ids:
+                raise ValueError(f"duplicate event_id in ledger: {event.event_id}")
+            seen_ids.add(event.event_id)
+            expected = performance_event_fingerprint(event)
+            if event.event_fingerprint != expected:
+                raise ValueError(
+                    f"event fingerprint mismatch for {event.event_id}: "
+                    f"stored={event.event_fingerprint}, expected={expected}"
+                )
+            events.append(event)
         return cls(
-            events=events,
+            events=tuple(events),
             schema_version=str(data.get("schema_version", "1.0.0")),
         )
 

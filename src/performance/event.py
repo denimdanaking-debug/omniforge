@@ -5,8 +5,10 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any, cast
 
 from src.recovery.clock import ensure_aware, isoformat
@@ -221,9 +223,9 @@ class PerformanceEvent:
     acceptance_status: AcceptanceStatus = AcceptanceStatus.PENDING
     first_pass: bool | None = None
     plan_valid: bool | None = None
-    validation_result_summary: dict[str, Any] = field(default_factory=dict)
+    validation_result_summary: Mapping[str, Any] = field(default_factory=dict)
     repair_metadata: RepairMetadata | None = None
-    review_finding_dispositions: dict[str, FindingDisposition] = field(default_factory=dict)
+    review_finding_dispositions: Mapping[str, FindingDisposition] = field(default_factory=dict)
     authority_adherence: AuthorityAdherenceStatus | None = None
     latency_seconds: float | None = None
     provider_wait_seconds: float | None = None
@@ -233,7 +235,7 @@ class PerformanceEvent:
     time_to_accepted_seconds: float | None = None
     task_difficulty: str | None = None
     evidence_refs: tuple[str, ...] = ()
-    originating_ids: dict[str, str] = field(default_factory=dict)
+    originating_ids: Mapping[str, str] = field(default_factory=dict)
     attribution: str = "unknown"
     event_fingerprint: str = ""
 
@@ -258,6 +260,21 @@ class PerformanceEvent:
             raise ValueError("provider_wait_seconds must be non-negative")
         if self.time_to_accepted_seconds is not None and self.time_to_accepted_seconds < 0:
             raise ValueError("time_to_accepted_seconds must be non-negative")
+        # Deep immutability: freeze any nested mappings so historical ledger
+        # contents cannot be mutated after append.
+        object.__setattr__(
+            self,
+            "validation_result_summary",
+            MappingProxyType(dict(self.validation_result_summary)),
+        )
+        object.__setattr__(
+            self,
+            "review_finding_dispositions",
+            MappingProxyType(dict(self.review_finding_dispositions)),
+        )
+        object.__setattr__(self, "originating_ids", MappingProxyType(dict(self.originating_ids)))
+        if not self.event_fingerprint:
+            object.__setattr__(self, "event_fingerprint", performance_event_fingerprint(self))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -281,7 +298,7 @@ class PerformanceEvent:
             "acceptance_status": self.acceptance_status.value,
             "first_pass": self.first_pass,
             "plan_valid": self.plan_valid,
-            "validation_result_summary": self.validation_result_summary,
+            "validation_result_summary": dict(self.validation_result_summary),
             "repair_metadata": self.repair_metadata.to_dict() if self.repair_metadata else None,
             "review_finding_dispositions": {
                 k: v.value for k, v in sorted(self.review_finding_dispositions.items())
@@ -349,9 +366,11 @@ class PerformanceEvent:
             ),
             first_pass=data.get("first_pass"),
             plan_valid=data.get("plan_valid"),
-            validation_result_summary=dict(data.get("validation_result_summary", {})),
+            validation_result_summary=MappingProxyType(
+                dict(data.get("validation_result_summary", {}))
+            ),
             repair_metadata=repair_metadata,
-            review_finding_dispositions=review_dispositions,
+            review_finding_dispositions=MappingProxyType(review_dispositions),
             authority_adherence=authority_adherence,
             latency_seconds=_optional_float(data.get("latency_seconds")),
             provider_wait_seconds=_optional_float(data.get("provider_wait_seconds")),
@@ -361,7 +380,7 @@ class PerformanceEvent:
             time_to_accepted_seconds=_optional_float(data.get("time_to_accepted_seconds")),
             task_difficulty=data.get("task_difficulty"),
             evidence_refs=tuple(data.get("evidence_refs", [])),
-            originating_ids=dict(data.get("originating_ids", {})),
+            originating_ids=MappingProxyType(dict(data.get("originating_ids", {}))),
             attribution=str(data.get("attribution", "unknown")),
             event_fingerprint=str(data.get("event_fingerprint", "")),
         )
@@ -401,6 +420,19 @@ def event_identity(
         "sequence": sequence,
     }
     normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def performance_event_fingerprint(event: PerformanceEvent) -> str:
+    """Deterministic full-content fingerprint of a performance event.
+
+    The fingerprint covers all material logical fields except the fingerprint
+    field itself. It is recomputed on load so forged or stale fingerprints are
+    detected before the ledger is trusted.
+    """
+    payload = event.to_dict()
+    payload.pop("event_fingerprint", None)
+    normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
