@@ -903,7 +903,7 @@ class TestRuntimeStateRecovery:
             "project_policies": {},
         }
         result = runtime_state.validate_runtime_state(old)
-        assert result["schema_version"] == "1.4.0"
+        assert result["schema_version"] == "1.5.0"
         assert result["provider_recovery_state"] == {}
         assert result["route_recovery_state"] == {}
         assert result["failure_domain_index"] == {}
@@ -911,6 +911,7 @@ class TestRuntimeStateRecovery:
         assert result["waiting_tasks"] == {}
         assert result["task_risk_state"] == {}
         assert result["task_retry_state"] == {}
+        assert result["performance_statistics"] == {}
 
     def test_runtime_state_validates_recovery_state_health(self) -> None:
         state = {
