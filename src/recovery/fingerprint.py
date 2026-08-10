@@ -13,6 +13,8 @@ import hashlib
 import json
 from typing import Any
 
+from src.context.schema import AuthorityPresence, ContextPacket
+from src.context.validation import ContextPacketValidator
 from src.providers.identity import ProviderQuotaState
 from src.recovery.eligibility import _effective_quota
 from src.recovery.failure_classification import FailureClassification
@@ -67,9 +69,20 @@ def _ledger_state(ledger: Any) -> dict[str, Any]:
             "next_recheck_at": ledger.current_wait.next_recheck_at.isoformat(),
             "affected_failure_domains": sorted(ledger.current_wait.affected_failure_domains),
         }
-    # Canonicalize exhausted paths as sortable tuples first to avoid comparing
-    # dictionaries directly.
-    exhausted = sorted((s, p, m) for s, p, m in ledger.exhausted_paths)
+
+    # Canonicalize exhausted paths with an explicitly sortable representation so
+    # optional provider_id/model_id values do not raise TypeError during sorting.
+    def _exhausted_sort_key(
+        item: tuple[str, str | None, str | None],
+    ) -> tuple[str, tuple[bool, str], tuple[bool, str]]:
+        signature, provider_id, model_id = item
+        return (
+            signature,
+            (provider_id is None, provider_id or ""),
+            (model_id is None, model_id or ""),
+        )
+
+    exhausted = sorted(ledger.exhausted_paths, key=_exhausted_sort_key)
     return {
         "attempt_count": ledger.attempt_count,
         "transient_retry_count": ledger.transient_retry_count(),
@@ -137,6 +150,69 @@ def _exclusions_dict(exclusions: tuple[Any, ...]) -> list[dict[str, Any]]:
         ],
         key=lambda d: (d["provider_id"], d["model_id"], d["route_id"], d["reason"]),
     )
+
+
+def _context_authority_fingerprint(inputs: Any) -> dict[str, Any] | None:
+    """Return deterministic context-authority decision inputs.
+
+    Includes the packet identity, risk requirements, and canonical Phase 7
+    validation outcome. Material authority differences therefore change the
+    recovery input fingerprint.
+    """
+    packet: ContextPacket | None = inputs.context_packet
+    requirements = inputs.risk_context_requirements
+    policy = inputs.risk_context_policy
+
+    req_dict: dict[str, Any] | None = None
+    if requirements is not None:
+        req_dict = {
+            "strategy_preference": requirements.strategy_preference,
+            "authority_required": requirements.authority_required,
+            "require_raw_authority": requirements.require_raw_authority,
+            "budget_multiplier": requirements.budget_multiplier,
+        }
+
+    policy_dict: dict[str, Any] | None = None
+    if policy is not None:
+        policy_dict = {"override_keys": sorted(policy._overrides.keys())}
+
+    if packet is None:
+        return {
+            "packet_present": False,
+            "requirements": req_dict,
+            "policy": policy_dict,
+            "validation": None,
+        }
+
+    issues = list(ContextPacketValidator().validate(packet))
+    issue_dicts = [{"severity": issue.severity, "code": issue.code} for issue in issues]
+    has_error = any(issue["severity"] == "error" for issue in issue_dicts)
+    authority_safe = not has_error
+    if requirements is not None:
+        if (
+            requirements.require_raw_authority
+            and packet.authority_presence is not AuthorityPresence.RAW_INCLUDED
+        ):
+            authority_safe = False
+        if (
+            requirements.authority_required
+            and packet.authority_presence is AuthorityPresence.NOT_REQUIRED
+        ):
+            authority_safe = False
+
+    return {
+        "packet_present": True,
+        "packet_content_hash": packet.content_hash(),
+        "authority_presence": packet.authority_presence.name,
+        "raw_item_count": packet.raw_item_count,
+        "summary_count": packet.summary_count,
+        "requirements": req_dict,
+        "policy": policy_dict,
+        "validation": {
+            "issues": sorted(issue_dicts, key=lambda d: (d["code"], d["severity"])),
+            "safe": authority_safe,
+        },
+    }
 
 
 def recovery_input_fingerprint(
@@ -210,6 +286,7 @@ def recovery_input_fingerprint(
             "reviewer_identities": sorted(inputs.reviewer_identities),
             "coder_identities": sorted(inputs.coder_identities),
         },
+        "context_authority": _context_authority_fingerprint(inputs),
     }
 
     canonical = json.dumps(redact(data), sort_keys=True, separators=(",", ":"), default=str)

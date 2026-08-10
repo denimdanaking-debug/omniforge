@@ -642,6 +642,19 @@ class RecoveryCoordinator:
                 attempt_counters=self._counters(ledger),
             )
 
+        current = self._current_candidate(inputs)
+        if selected != current:
+            return self._reroute(
+                inputs,
+                classification,
+                signature,
+                fingerprint,
+                selected,
+                RecoveryAction.REROUTE_MODEL,
+                "structured output retry: current candidate ineligible, switching model",
+                evidence_packet=self._structured_output_evidence(inputs),
+            )
+
         return RecoveryDecision(
             action=RecoveryAction.CONSTRAINED_OUTPUT_RETRY,
             classification=classification,
@@ -704,6 +717,19 @@ class RecoveryCoordinator:
                 RecoveryAction.BLOCK,
                 "replan: current candidate no longer eligible",
                 attempt_counters=self._counters(ledger),
+            )
+
+        current = self._current_candidate(inputs)
+        if selected != current:
+            return self._reroute(
+                inputs,
+                classification,
+                signature,
+                fingerprint,
+                selected,
+                RecoveryAction.REROUTE_MODEL,
+                "replan: current planner ineligible, switching planner",
+                evidence_packet=self._planning_evidence(inputs),
             )
 
         return RecoveryDecision(
@@ -794,6 +820,24 @@ class RecoveryCoordinator:
                 RecoveryAction.BLOCK,
                 "repair: current candidate no longer eligible",
                 attempt_counters=self._counters(ledger),
+            )
+
+        current = self._current_candidate(inputs)
+        if selected != current:
+            action = (
+                RecoveryAction.CROSS_MODEL_REPAIR
+                if selected.provider_id != current.provider_id
+                else RecoveryAction.REROUTE_MODEL
+            )
+            return self._reroute(
+                inputs,
+                classification,
+                signature,
+                fingerprint,
+                selected,
+                action,
+                "repair: current model ineligible, switching model",
+                evidence_packet=self._implementation_evidence(inputs),
             )
 
         return RecoveryDecision(
@@ -1024,7 +1068,11 @@ class RecoveryCoordinator:
         action: RecoveryAction,
         reason: str,
         require_risk_escalation: bool = False,
+        evidence_packet: dict[str, Any] | None = None,
     ) -> RecoveryDecision:
+        packet: dict[str, Any] = {"reroute_reason": reason, "selected_candidate": candidate.key}
+        if evidence_packet is not None:
+            packet["original_evidence"] = evidence_packet
         return RecoveryDecision(
             action=action,
             classification=classification,
@@ -1037,7 +1085,7 @@ class RecoveryCoordinator:
             require_risk_escalation=require_risk_escalation,
             wait_reason="",
             retry_after=None,
-            evidence_packet={"reroute_reason": reason, "selected_candidate": candidate.key},
+            evidence_packet=packet,
             attempt_counters=self._counters(inputs.ledger),
             terminal=False,
             explanation=f"{reason}; model quality unaffected for infrastructure failures.",
@@ -1474,12 +1522,17 @@ class RecoveryCoordinator:
 
     def _context_authority_safe(self, inputs: RecoveryCoordinatorInput) -> bool:
         packet = inputs.context_packet
+        requirements = self._risk_context_requirements(inputs)
+        authority_required = requirements.authority_required if requirements is not None else False
         if packet is None:
-            # Fallback to legacy metadata gate only when no Phase 7 packet is supplied.
-            meta = inputs.classifier_input.context_overflow
-            if meta is None:
-                return True
-            return not (meta.authority_required and meta.authority_items_raw == 0)
+            # Legacy non-authority contexts may proceed without a typed packet.
+            # Any context where authority is required must supply a Phase 7 packet.
+            if not authority_required:
+                meta = inputs.classifier_input.context_overflow
+                if meta is None:
+                    return True
+                return not (meta.authority_required and meta.authority_items_raw == 0)
+            return False
         validation = self._context_authority_validation(inputs)
         return validation is not None and validation["safe"]
 

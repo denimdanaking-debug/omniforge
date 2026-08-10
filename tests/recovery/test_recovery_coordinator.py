@@ -6,6 +6,7 @@ import datetime
 
 import pytest
 
+from src.context.schema import AuthorityContextItem, AuthorityPresence, ContextPacket, ProvenanceRef
 from src.policy.risk import RiskLevel
 from src.providers.errors import ProviderError, ProviderErrorCode
 from src.providers.identity import ProviderHealth, ProviderQuotaState, QuotaSignal
@@ -27,6 +28,7 @@ from src.recovery.recovery_coordinator import (
 from src.recovery.retry_policy import FailureRecoveryPolicy
 from src.recovery.retry_state import RetryLedger, RetryType
 from src.recovery.state_machine import RouteRecoveryState
+from src.risk.context_policy import RiskContextRequirements
 from src.routing.capabilities import ModelCapabilities
 from src.routing.inference_route import InferenceRouteIdentity, RouteType
 from src.routing.model_identity import ModelIdentity
@@ -81,6 +83,43 @@ def _candidate(
         recovery_state=RouteRecoveryState(health=health),
         quota=quota,
         failure_domain=failure_domain or provider_id,
+    )
+
+
+def _valid_raw_authority_packet() -> ContextPacket:
+    provenance = ProvenanceRef(
+        source_type="authority",
+        path="docs/PROJECT_STATE.json",
+        revision="abc123",
+        content_hash="hash1",
+        authority_level="project",
+    )
+    authority = AuthorityContextItem(
+        authority_id="state",
+        provenance_id="state-prov",
+        full_source_ref="docs/PROJECT_STATE.json",
+        revision="abc123",
+        content_hash="hash1",
+        content="{}",
+        raw_included=True,
+    )
+    return ContextPacket(
+        authority=(authority,),
+        provenance_index={"state-prov": provenance},
+        authority_presence=AuthorityPresence.RAW_INCLUDED,
+        raw_item_count=1,
+    )
+
+
+def _r2_raw_authority_requirements() -> RiskContextRequirements:
+    return RiskContextRequirements(
+        strategy_preference="hybrid",
+        authority_required=True,
+        require_raw_authority=True,
+        include_test_evidence=False,
+        include_historical_findings=False,
+        budget_multiplier=1.0,
+        rationale="test",
     )
 
 
@@ -669,6 +708,8 @@ class TestContextOverflow:
             policy=policy,
             current_risk=RiskLevel.R2_NORMAL,
             role=ExecutionRole.CODING,
+            context_packet=_valid_raw_authority_packet(),
+            risk_context_requirements=_r2_raw_authority_requirements(),
         )
         coordinator = RecoveryCoordinator(clock=clock)
         decision = coordinator.decide(coord_input)
@@ -722,6 +763,8 @@ class TestContextOverflow:
             policy=policy,
             current_risk=RiskLevel.R2_NORMAL,
             role=ExecutionRole.CODING,
+            context_packet=_valid_raw_authority_packet(),
+            risk_context_requirements=_r2_raw_authority_requirements(),
         )
         coordinator = RecoveryCoordinator(clock=clock)
         decision = coordinator.decide(coord_input)
@@ -1112,3 +1155,162 @@ class TestCurrentCandidateEligibility:
             decision.selected_candidate is None
             or decision.selected_candidate.route_id != "openai-direct"
         )
+
+
+class TestActionCandidateConsistency:
+    """Selected candidate and action metadata must be mutually consistent."""
+
+    def _make_structured_input(
+        self,
+        clock: FixedClock,
+        policy: FailureRecoveryPolicy,
+        model_enabled: dict[str, bool] | None = None,
+    ) -> RecoveryCoordinatorInput:
+        candidates = (
+            _candidate("openai", "gpt-4o", "openai-direct"),
+            _candidate("anthropic", "claude", "anthropic-direct"),
+        )
+        inputs = FailureClassifierInput(
+            task_id="task-1",
+            role=ExecutionRole.CODING,
+            structured_output_validation=StructuredOutputValidationResult(
+                missing_required_fields=("risk",)
+            ),
+            provider_id="openai",
+            model_id="gpt-4o",
+            route_id="openai-direct",
+        )
+        return RecoveryCoordinatorInput(
+            classifier_input=inputs,
+            candidates=candidates,
+            ledger=RetryLedger("task-1"),
+            policy=policy,
+            current_risk=RiskLevel.R2_NORMAL,
+            model_enabled=model_enabled,
+            role=ExecutionRole.CODING,
+        )
+
+    def test_structured_retry_switches_action_when_current_model_ineligible(
+        self, clock: FixedClock, policy: FailureRecoveryPolicy
+    ) -> None:
+        coord_input = self._make_structured_input(clock, policy, model_enabled={"gpt-4o": False})
+        decision = RecoveryCoordinator(clock=clock).decide(coord_input)
+        assert decision.action is RecoveryAction.REROUTE_MODEL
+        assert decision.selected_candidate is not None
+        assert decision.selected_candidate.model_id == "claude"
+        assert decision.require_reroute is True
+        assert "missing_required_fields" in decision.evidence_packet.get("original_evidence", {})
+
+    def test_replan_switches_action_when_current_route_ineligible(
+        self, clock: FixedClock, policy: FailureRecoveryPolicy
+    ) -> None:
+        candidates = (
+            _candidate(
+                "openai",
+                "gpt-4o",
+                "openai-direct",
+                supported_roles=frozenset({ExecutionRole.PLANNING.value}),
+                health=ProviderHealth.UNAVAILABLE,
+            ),
+            _candidate(
+                "anthropic",
+                "claude",
+                "anthropic-direct",
+                supported_roles=frozenset({ExecutionRole.PLANNING.value}),
+            ),
+        )
+        inputs = FailureClassifierInput(
+            task_id="task-1",
+            role=ExecutionRole.PLANNING,
+            planning_validation=PlanningValidationResult(missing_steps=("validate",)),
+            provider_id="openai",
+            model_id="gpt-4o",
+            route_id="openai-direct",
+        )
+        coord_input = RecoveryCoordinatorInput(
+            classifier_input=inputs,
+            candidates=candidates,
+            ledger=RetryLedger("task-1"),
+            policy=policy,
+            current_risk=RiskLevel.R2_NORMAL,
+            role=ExecutionRole.PLANNING,
+        )
+        decision = RecoveryCoordinator(clock=clock).decide(coord_input)
+        assert decision.action is RecoveryAction.REROUTE_MODEL
+        assert decision.selected_candidate is not None
+        assert decision.selected_candidate.route_id == "anthropic-direct"
+        assert decision.require_reroute is True
+        assert "missing_steps" in decision.evidence_packet.get("original_evidence", {})
+
+    def test_repair_switches_action_when_current_provider_quota_exhausted(
+        self, clock: FixedClock, policy: FailureRecoveryPolicy
+    ) -> None:
+        candidates = (
+            _candidate(
+                "openai",
+                "gpt-4o",
+                "openai-direct",
+                quota=ProviderQuotaState(provider_signal=QuotaSignal.EXHAUSTED),
+            ),
+            _candidate("anthropic", "claude", "anthropic-direct"),
+        )
+        inputs = FailureClassifierInput(
+            task_id="task-1",
+            role=ExecutionRole.CODING,
+            deterministic_validation=ValidationResultSummary(
+                validator="pytest",
+                passed=False,
+                failing_check_names=("test_foo",),
+                exit_status=1,
+            ),
+            provider_id="openai",
+            model_id="gpt-4o",
+            route_id="openai-direct",
+        )
+        coord_input = RecoveryCoordinatorInput(
+            classifier_input=inputs,
+            candidates=candidates,
+            ledger=RetryLedger("task-1"),
+            policy=policy,
+            current_risk=RiskLevel.R2_NORMAL,
+            role=ExecutionRole.CODING,
+        )
+        decision = RecoveryCoordinator(clock=clock).decide(coord_input)
+        assert decision.action is RecoveryAction.CROSS_MODEL_REPAIR
+        assert decision.selected_candidate is not None
+        assert decision.selected_candidate.provider_id == "anthropic"
+        assert decision.require_reroute is True
+        assert "failing_check_names" in decision.evidence_packet.get("original_evidence", {})
+
+    def test_same_candidate_action_does_not_claim_reroute(
+        self, clock: FixedClock, policy: FailureRecoveryPolicy
+    ) -> None:
+        coord_input = self._make_structured_input(clock, policy)
+        decision = RecoveryCoordinator(clock=clock).decide(coord_input)
+        assert decision.action is RecoveryAction.CONSTRAINED_OUTPUT_RETRY
+        assert decision.selected_candidate is not None
+        assert decision.selected_candidate.model_id == "gpt-4o"
+        assert decision.require_reroute is False
+
+    def test_no_decision_claims_same_path_with_different_candidate(
+        self, clock: FixedClock, policy: FailureRecoveryPolicy
+    ) -> None:
+        """Architectural invariant: different candidate implies require_reroute=True."""
+        coordinator = RecoveryCoordinator(clock=clock)
+        for make_input in [
+            lambda: self._make_structured_input(clock, policy, model_enabled={"gpt-4o": False}),
+            lambda: self._make_structured_input(clock, policy, model_enabled={"gpt-4o": False}),
+        ]:
+            decision = coordinator.decide(make_input())
+            if decision.selected_candidate is None:
+                continue
+            current_provider = "openai"
+            current_model = "gpt-4o"
+            selected = decision.selected_candidate
+            same_candidate = (
+                selected.provider_id == current_provider and selected.model_id == current_model
+            )
+            if not same_candidate:
+                assert decision.require_reroute is True, (
+                    f"{decision.action} selected different candidate but require_reroute=False"
+                )

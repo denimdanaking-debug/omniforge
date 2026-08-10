@@ -6,6 +6,7 @@ import datetime
 
 import pytest
 
+from src.context.schema import AuthorityContextItem, AuthorityPresence, ContextPacket, ProvenanceRef
 from src.policy.risk import RiskLevel
 from src.providers.errors import ProviderError, ProviderErrorCode
 from src.providers.identity import ProviderHealth, ProviderQuotaState, QuotaSignal
@@ -22,6 +23,7 @@ from src.recovery.reserve import ReserveCapacityPolicy
 from src.recovery.retry_policy import FailureRecoveryPolicy
 from src.recovery.retry_state import RetryLedger, RetryType
 from src.recovery.state_machine import RouteRecoveryState
+from src.risk.context_policy import RiskContextRequirements
 from src.routing.capabilities import ModelCapabilities
 from src.routing.inference_route import InferenceRouteIdentity, RouteType
 from src.routing.model_identity import ModelIdentity
@@ -95,6 +97,93 @@ def _base_inputs(
     }
     defaults.update(kwargs)
     return RecoveryCoordinatorInput(**defaults)  # type: ignore[arg-type]
+
+
+def _valid_raw_authority_packet() -> ContextPacket:
+    provenance = ProvenanceRef(
+        source_type="authority",
+        path="docs/PROJECT_STATE.json",
+        revision="abc123",
+        content_hash="hash1",
+        authority_level="project",
+    )
+    authority = AuthorityContextItem(
+        authority_id="state",
+        provenance_id="state-prov",
+        full_source_ref="docs/PROJECT_STATE.json",
+        revision="abc123",
+        content_hash="hash1",
+        content="{}",
+        raw_included=True,
+    )
+    return ContextPacket(
+        authority=(authority,),
+        provenance_index={"state-prov": provenance},
+        authority_presence=AuthorityPresence.RAW_INCLUDED,
+        raw_item_count=1,
+    )
+
+
+def _invalid_raw_missing_hash_packet() -> ContextPacket:
+    provenance = ProvenanceRef(
+        source_type="authority",
+        path="docs/PROJECT_STATE.json",
+        revision="abc123",
+        content_hash="hash1",
+        authority_level="project",
+    )
+    authority = AuthorityContextItem(
+        authority_id="state",
+        provenance_id="state-prov",
+        full_source_ref="docs/PROJECT_STATE.json",
+        revision="",
+        content_hash="hash1",
+        content="{}",
+        raw_included=True,
+    )
+    return ContextPacket(
+        authority=(authority,),
+        provenance_index={"state-prov": provenance},
+        authority_presence=AuthorityPresence.RAW_INCLUDED,
+        raw_item_count=1,
+    )
+
+
+def _referenced_authority_packet() -> ContextPacket:
+    provenance = ProvenanceRef(
+        source_type="authority",
+        path="docs/PROJECT_STATE.json",
+        revision="abc123",
+        content_hash="hash1",
+        authority_level="project",
+    )
+    authority = AuthorityContextItem(
+        authority_id="state",
+        provenance_id="state-prov",
+        full_source_ref="docs/PROJECT_STATE.json",
+        revision="abc123",
+        content_hash="hash1",
+        content=None,
+        raw_included=False,
+    )
+    return ContextPacket(
+        authority=(authority,),
+        provenance_index={"state-prov": provenance},
+        authority_presence=AuthorityPresence.RAW_REFERENCED,
+        raw_item_count=0,
+    )
+
+
+def _r4_raw_requirements() -> RiskContextRequirements:
+    return RiskContextRequirements(
+        strategy_preference="large_context",
+        authority_required=True,
+        require_raw_authority=True,
+        include_test_evidence=False,
+        include_historical_findings=False,
+        budget_multiplier=2.0,
+        rationale="test",
+    )
 
 
 class TestRecoveryFingerprint:
@@ -292,6 +381,118 @@ class TestRecoveryFingerprintCompleteness:
         index.register("openai-direct", "shared-domain")
         index.register("anthropic-direct", "shared-domain")
         inputs2 = _base_inputs(clock, failure_domain_index=index)
+        d1 = RecoveryCoordinator(clock=clock).decide(inputs1)
+        d2 = RecoveryCoordinator(clock=clock).decide(inputs2)
+        assert d1.deterministic_input_fingerprint != d2.deterministic_input_fingerprint
+
+    def test_exhausted_paths_with_optional_ids_sortable(self, clock: FixedClock) -> None:
+        ledger = RetryLedger("task-1")
+        ledger.mark_exhausted_path("sig-a", None, "model-a")
+        ledger.mark_exhausted_path("sig-b", "provider-b", "model-b")
+        ledger.mark_exhausted_path("sig-c", "provider-c", None)
+        inputs = _base_inputs(clock, ledger=ledger)
+        # Must not raise TypeError from comparing None to str.
+        RecoveryCoordinator(clock=clock).decide(inputs)
+
+    def test_exhausted_paths_with_optional_ids_order_invariant(self, clock: FixedClock) -> None:
+        ledger1 = RetryLedger("task-1")
+        ledger1.mark_exhausted_path("sig-a", None, "model-a")
+        ledger1.mark_exhausted_path("sig-b", "provider-b", "model-b")
+        ledger2 = RetryLedger("task-1")
+        ledger2.mark_exhausted_path("sig-b", "provider-b", "model-b")
+        ledger2.mark_exhausted_path("sig-a", None, "model-a")
+        inputs1 = _base_inputs(clock, ledger=ledger1)
+        inputs2 = _base_inputs(clock, ledger=ledger2)
+        d1 = RecoveryCoordinator(clock=clock).decide(inputs1)
+        d2 = RecoveryCoordinator(clock=clock).decide(inputs2)
+        assert d1.deterministic_input_fingerprint == d2.deterministic_input_fingerprint
+
+    def test_exhausted_path_identity_change_changes_fingerprint(self, clock: FixedClock) -> None:
+        ledger1 = RetryLedger("task-1")
+        ledger1.mark_exhausted_path("sig-a", "provider-a", "model-a")
+        ledger2 = RetryLedger("task-1")
+        ledger2.mark_exhausted_path("sig-a", "provider-a", "model-b")
+        inputs1 = _base_inputs(clock, ledger=ledger1)
+        inputs2 = _base_inputs(clock, ledger=ledger2)
+        d1 = RecoveryCoordinator(clock=clock).decide(inputs1)
+        d2 = RecoveryCoordinator(clock=clock).decide(inputs2)
+        assert d1.deterministic_input_fingerprint != d2.deterministic_input_fingerprint
+
+
+class TestContextAuthorityFingerprint:
+    def test_valid_vs_invalid_raw_authority_changes_fingerprint(self, clock: FixedClock) -> None:
+        valid = _valid_raw_authority_packet()
+        invalid = _invalid_raw_missing_hash_packet()
+        inputs1 = _base_inputs(
+            clock,
+            context_packet=valid,
+            risk_context_requirements=_r4_raw_requirements(),
+        )
+        inputs2 = _base_inputs(
+            clock,
+            context_packet=invalid,
+            risk_context_requirements=_r4_raw_requirements(),
+        )
+        d1 = RecoveryCoordinator(clock=clock).decide(inputs1)
+        d2 = RecoveryCoordinator(clock=clock).decide(inputs2)
+        assert d1.deterministic_input_fingerprint != d2.deterministic_input_fingerprint
+
+    def test_r4_raw_included_vs_referenced_changes_fingerprint(self, clock: FixedClock) -> None:
+        included = _valid_raw_authority_packet()
+        referenced = _referenced_authority_packet()
+        inputs1 = _base_inputs(
+            clock,
+            context_packet=included,
+            risk_context_requirements=_r4_raw_requirements(),
+        )
+        inputs2 = _base_inputs(
+            clock,
+            context_packet=referenced,
+            risk_context_requirements=_r4_raw_requirements(),
+        )
+        d1 = RecoveryCoordinator(clock=clock).decide(inputs1)
+        d2 = RecoveryCoordinator(clock=clock).decide(inputs2)
+        assert d1.deterministic_input_fingerprint != d2.deterministic_input_fingerprint
+
+    def test_roundtripped_packet_same_fingerprint(self, clock: FixedClock) -> None:
+        packet = _valid_raw_authority_packet()
+        roundtripped = ContextPacket.from_dict(packet.to_dict())
+        inputs1 = _base_inputs(
+            clock,
+            context_packet=packet,
+            risk_context_requirements=_r4_raw_requirements(),
+        )
+        inputs2 = _base_inputs(
+            clock,
+            context_packet=roundtripped,
+            risk_context_requirements=_r4_raw_requirements(),
+        )
+        d1 = RecoveryCoordinator(clock=clock).decide(inputs1)
+        d2 = RecoveryCoordinator(clock=clock).decide(inputs2)
+        assert d1.deterministic_input_fingerprint == d2.deterministic_input_fingerprint
+
+    def test_risk_context_requirement_change_changes_fingerprint(self, clock: FixedClock) -> None:
+        packet = _valid_raw_authority_packet()
+        req1 = _r4_raw_requirements()
+        req2 = RiskContextRequirements(
+            strategy_preference="hybrid",
+            authority_required=True,
+            require_raw_authority=False,
+            include_test_evidence=False,
+            include_historical_findings=False,
+            budget_multiplier=1.0,
+            rationale="test",
+        )
+        inputs1 = _base_inputs(
+            clock,
+            context_packet=packet,
+            risk_context_requirements=req1,
+        )
+        inputs2 = _base_inputs(
+            clock,
+            context_packet=packet,
+            risk_context_requirements=req2,
+        )
         d1 = RecoveryCoordinator(clock=clock).decide(inputs1)
         d2 = RecoveryCoordinator(clock=clock).decide(inputs2)
         assert d1.deterministic_input_fingerprint != d2.deterministic_input_fingerprint

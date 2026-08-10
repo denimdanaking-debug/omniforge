@@ -146,26 +146,20 @@ class TestContextOverflowRecovery:
             _candidate("openai", "gpt-4o", "openai-direct", context_tokens=16_000),
             _candidate("anthropic", "claude", "anthropic-direct", context_tokens=64_000),
         )
-        inputs = FailureClassifierInput(
-            task_id="task-1",
-            role=ExecutionRole.CODING,
-            context_overflow=ContextOverflowMetadata(
-                estimated_input_chars=160_000,
-                model_context_tokens=16_000,
+        coord_input = _make_overflow_input_with_packet(
+            clock,
+            _valid_raw_authority_packet(),
+            RiskContextRequirements(
+                strategy_preference="large_context",
                 authority_required=True,
-                authority_items_raw=2,
+                require_raw_authority=True,
+                include_test_evidence=False,
+                include_historical_findings=False,
+                budget_multiplier=2.0,
+                rationale="test",
             ),
-            provider_id="openai",
-            model_id="gpt-4o",
-            route_id="openai-direct",
-        )
-        coord_input = RecoveryCoordinatorInput(
-            classifier_input=inputs,
-            candidates=candidates,
             ledger=ledger,
-            policy=FailureRecoveryPolicy(),
-            current_risk=RiskLevel.R2_NORMAL,
-            role=ExecutionRole.CODING,
+            candidates=candidates,
         )
         decision = RecoveryCoordinator(clock=clock).decide(coord_input)
         assert decision.action is RecoveryAction.REROUTE_MODEL
@@ -198,6 +192,90 @@ class TestContextOverflowRecovery:
         decision = RecoveryCoordinator(clock=clock).decide(coord_input)
         assert decision.action is RecoveryAction.BLOCK
         assert "authority validation failed" in decision.explanation.lower()
+
+    def test_r4_blocks_without_typed_packet_even_if_raw_count_positive(
+        self, clock: FixedClock
+    ) -> None:
+        candidates = (_candidate("openai", "gpt-4o", "openai-direct", context_tokens=16_000),)
+        inputs = FailureClassifierInput(
+            task_id="task-1",
+            role=ExecutionRole.CODING,
+            context_overflow=ContextOverflowMetadata(
+                estimated_input_chars=160_000,
+                model_context_tokens=16_000,
+                authority_required=True,
+                authority_items_raw=1,
+            ),
+            provider_id="openai",
+            model_id="gpt-4o",
+            route_id="openai-direct",
+        )
+        coord_input = RecoveryCoordinatorInput(
+            classifier_input=inputs,
+            candidates=candidates,
+            ledger=RetryLedger("task-1"),
+            policy=FailureRecoveryPolicy(),
+            current_risk=RiskLevel.R4_CRITICAL_AUTHORITY,
+            role=ExecutionRole.CODING,
+        )
+        decision = RecoveryCoordinator(clock=clock).decide(coord_input)
+        assert decision.action is RecoveryAction.BLOCK
+        assert "authority validation failed" in decision.explanation.lower()
+
+    def test_r2_with_authority_required_blocks_without_typed_packet(
+        self, clock: FixedClock
+    ) -> None:
+        candidates = (_candidate("openai", "gpt-4o", "openai-direct", context_tokens=16_000),)
+        inputs = FailureClassifierInput(
+            task_id="task-1",
+            role=ExecutionRole.CODING,
+            context_overflow=ContextOverflowMetadata(
+                estimated_input_chars=160_000,
+                model_context_tokens=16_000,
+                authority_required=True,
+                authority_items_raw=1,
+            ),
+            provider_id="openai",
+            model_id="gpt-4o",
+            route_id="openai-direct",
+        )
+        coord_input = RecoveryCoordinatorInput(
+            classifier_input=inputs,
+            candidates=candidates,
+            ledger=RetryLedger("task-1"),
+            policy=FailureRecoveryPolicy(),
+            current_risk=RiskLevel.R2_NORMAL,
+            role=ExecutionRole.CODING,
+        )
+        decision = RecoveryCoordinator(clock=clock).decide(coord_input)
+        assert decision.action is RecoveryAction.BLOCK
+
+    def test_non_authority_context_may_use_legacy_metadata_without_packet(
+        self, clock: FixedClock
+    ) -> None:
+        candidates = (_candidate("openai", "gpt-4o", "openai-direct", context_tokens=1000),)
+        inputs = FailureClassifierInput(
+            task_id="task-1",
+            role=ExecutionRole.CODING,
+            context_overflow=ContextOverflowMetadata(
+                estimated_input_chars=5_000,
+                model_context_tokens=1000,
+                authority_required=False,
+            ),
+            provider_id="openai",
+            model_id="gpt-4o",
+            route_id="openai-direct",
+        )
+        coord_input = RecoveryCoordinatorInput(
+            classifier_input=inputs,
+            candidates=candidates,
+            ledger=RetryLedger("task-1"),
+            policy=FailureRecoveryPolicy(),
+            current_risk=RiskLevel.R1_LOW,
+            role=ExecutionRole.CODING,
+        )
+        decision = RecoveryCoordinator(clock=clock).decide(coord_input)
+        assert decision.action is RecoveryAction.REBUILD_CONTEXT
 
     def test_rebuild_context_is_bounded(self, clock: FixedClock) -> None:
         ledger = RetryLedger("task-1")

@@ -6,6 +6,7 @@ import datetime
 
 import pytest
 
+from src.context.schema import AuthorityContextItem, AuthorityPresence, ContextPacket, ProvenanceRef
 from src.policy.risk import RiskLevel
 from src.providers.errors import ProviderError, ProviderErrorCode
 from src.providers.identity import ProviderQuotaState, QuotaSignal
@@ -23,6 +24,7 @@ from src.recovery.recovery_coordinator import (
 from src.recovery.retry_policy import FailureRecoveryPolicy
 from src.recovery.retry_state import RetryLedger, RetryType
 from src.recovery.state_machine import RouteRecoveryState
+from src.risk.context_policy import RiskContextRequirements
 from src.routing.capabilities import ModelCapabilities
 from src.routing.inference_route import InferenceRouteIdentity, RouteType
 from src.routing.model_identity import ModelIdentity
@@ -60,6 +62,43 @@ def _candidate(
         recovery_state=RouteRecoveryState(),
         quota=quota,
         failure_domain=provider_id,
+    )
+
+
+def _valid_raw_authority_packet() -> ContextPacket:
+    provenance = ProvenanceRef(
+        source_type="authority",
+        path="docs/PROJECT_STATE.json",
+        revision="abc123",
+        content_hash="hash1",
+        authority_level="project",
+    )
+    authority = AuthorityContextItem(
+        authority_id="state",
+        provenance_id="state-prov",
+        full_source_ref="docs/PROJECT_STATE.json",
+        revision="abc123",
+        content_hash="hash1",
+        content="{}",
+        raw_included=True,
+    )
+    return ContextPacket(
+        authority=(authority,),
+        provenance_index={"state-prov": provenance},
+        authority_presence=AuthorityPresence.RAW_INCLUDED,
+        raw_item_count=1,
+    )
+
+
+def _r2_raw_authority_requirements() -> RiskContextRequirements:
+    return RiskContextRequirements(
+        strategy_preference="hybrid",
+        authority_required=True,
+        require_raw_authority=True,
+        include_test_evidence=False,
+        include_historical_findings=False,
+        budget_multiplier=1.0,
+        rationale="test",
     )
 
 
@@ -188,6 +227,8 @@ class TestRetryStateTransitions:
             policy=FailureRecoveryPolicy(),
             current_risk=RiskLevel.R2_NORMAL,
             role=ExecutionRole.CODING,
+            context_packet=_valid_raw_authority_packet(),
+            risk_context_requirements=_r2_raw_authority_requirements(),
         )
         coordinator = RecoveryCoordinator(clock=clock)
         decision = coordinator.decide_and_record(inputs)
