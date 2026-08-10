@@ -13,6 +13,7 @@ from src.providers.identity import ProviderQuotaState, QuotaSignal
 from src.recovery import FixedClock
 from src.recovery.failure_classification import (
     FailureClassifierInput,
+    StructuredOutputValidationResult,
     ValidationResultSummary,
 )
 from src.recovery.recovery_coordinator import (
@@ -260,3 +261,165 @@ class TestRetryStateTransitions:
         assert record is not None
         assert record.action_taken == decision.action.value
         assert record.retry_type is RetryType.REPAIR
+
+
+class TestSourceDestinationExhaustion:
+    """Reroute transitions must exhaust the SOURCE failing path, not destination."""
+
+    def _make_reroute_input(
+        self,
+        clock: FixedClock,
+        ledger: RetryLedger,
+        action_trigger: str,
+        **kwargs: object,
+    ) -> RecoveryCoordinatorInput:
+        if action_trigger == "reroute_model":
+            classifier_input = FailureClassifierInput(
+                task_id="task-1",
+                role=ExecutionRole.CODING,
+                structured_output_validation=StructuredOutputValidationResult(
+                    missing_required_fields=("risk",)
+                ),
+                provider_id="openai",
+                model_id="gpt-4o",
+                route_id="openai-direct",
+            )
+            defaults: dict[str, object] = {
+                "classifier_input": classifier_input,
+                "candidates": (
+                    _candidate("openai", "gpt-4o", "openai-direct"),
+                    _candidate("anthropic", "claude", "anthropic-direct"),
+                ),
+                "ledger": ledger,
+                "policy": FailureRecoveryPolicy(max_structured_output_retries=0),
+                "current_risk": RiskLevel.R2_NORMAL,
+                "role": ExecutionRole.CODING,
+            }
+        elif action_trigger == "reroute_provider":
+            classifier_input = FailureClassifierInput(
+                task_id="task-1",
+                role=ExecutionRole.CODING,
+                provider_error=ProviderError(
+                    code=ProviderErrorCode.QUOTA_EXHAUSTED, message="quota"
+                ),
+                provider_id="openai",
+                model_id="gpt-4o",
+                route_id="openai-direct",
+            )
+            defaults = {
+                "classifier_input": classifier_input,
+                "candidates": (
+                    _candidate(
+                        "openai",
+                        "gpt-4o",
+                        "openai-direct",
+                        quota=ProviderQuotaState(provider_signal=QuotaSignal.EXHAUSTED),
+                    ),
+                    _candidate("anthropic", "claude", "anthropic-direct"),
+                ),
+                "ledger": ledger,
+                "policy": FailureRecoveryPolicy(),
+                "current_risk": RiskLevel.R2_NORMAL,
+                "role": ExecutionRole.CODING,
+            }
+        else:  # cross_model_repair
+            classifier_input = FailureClassifierInput(
+                task_id="task-1",
+                role=ExecutionRole.CODING,
+                deterministic_validation=ValidationResultSummary(
+                    validator="pytest",
+                    passed=False,
+                    failing_check_names=("test_foo",),
+                    exit_status=1,
+                ),
+                provider_id="openai",
+                model_id="gpt-4o",
+                route_id="openai-direct",
+            )
+            defaults = {
+                "classifier_input": classifier_input,
+                "candidates": (
+                    _candidate("openai", "gpt-4o", "openai-direct"),
+                    _candidate("anthropic", "claude", "anthropic-direct"),
+                ),
+                "ledger": ledger,
+                "policy": FailureRecoveryPolicy(max_same_model_repairs=0),
+                "current_risk": RiskLevel.R2_NORMAL,
+                "role": ExecutionRole.CODING,
+            }
+        defaults.update(kwargs)
+        return RecoveryCoordinatorInput(**defaults)  # type: ignore[arg-type]
+
+    def _assert_source_exhausted_not_destination(
+        self,
+        ledger: RetryLedger,
+        signature: str,
+        source_provider: str,
+        source_model: str,
+        destination_provider: str,
+        destination_model: str,
+    ) -> None:
+        assert ledger.is_exhausted_path(signature, source_provider, source_model)
+        assert not ledger.is_exhausted_path(signature, destination_provider, destination_model)
+
+    def test_reroute_model_exhausts_source(self, clock: FixedClock) -> None:
+        ledger = RetryLedger("task-1")
+        inputs = self._make_reroute_input(clock, ledger, "reroute_model")
+        coordinator = RecoveryCoordinator(clock=clock)
+        decision = coordinator.decide_and_record(inputs)
+        assert decision.action is RecoveryAction.REROUTE_MODEL
+        assert decision.selected_candidate is not None
+        assert decision.selected_candidate.model_id == "claude"
+        self._assert_source_exhausted_not_destination(
+            ledger,
+            decision.failure_signature,
+            "openai",
+            "gpt-4o",
+            "anthropic",
+            "claude",
+        )
+
+    def test_reroute_provider_exhausts_source(self, clock: FixedClock) -> None:
+        ledger = RetryLedger("task-1")
+        inputs = self._make_reroute_input(clock, ledger, "reroute_provider")
+        coordinator = RecoveryCoordinator(clock=clock)
+        decision = coordinator.decide_and_record(inputs)
+        assert decision.action is RecoveryAction.REROUTE_PROVIDER
+        assert decision.selected_candidate is not None
+        assert decision.selected_candidate.provider_id == "anthropic"
+        self._assert_source_exhausted_not_destination(
+            ledger,
+            decision.failure_signature,
+            "openai",
+            "gpt-4o",
+            "anthropic",
+            "claude",
+        )
+
+    def test_cross_model_repair_exhausts_source(self, clock: FixedClock) -> None:
+        ledger = RetryLedger("task-1")
+        inputs = self._make_reroute_input(clock, ledger, "cross_model_repair")
+        coordinator = RecoveryCoordinator(clock=clock)
+        decision = coordinator.decide_and_record(inputs)
+        assert decision.action is RecoveryAction.CROSS_MODEL_REPAIR
+        assert decision.selected_candidate is not None
+        assert decision.selected_candidate.model_id == "claude"
+        self._assert_source_exhausted_not_destination(
+            ledger,
+            decision.failure_signature,
+            "openai",
+            "gpt-4o",
+            "anthropic",
+            "claude",
+        )
+
+    def test_reroute_source_exhaustion_survives_restart(self, clock: FixedClock) -> None:
+        ledger = RetryLedger("task-1")
+        inputs = self._make_reroute_input(clock, ledger, "cross_model_repair")
+        coordinator = RecoveryCoordinator(clock=clock)
+        decision = coordinator.decide_and_record(inputs)
+        signature = decision.failure_signature
+
+        reloaded = RetryLedger.from_dict(ledger.to_dict())
+        assert reloaded.is_exhausted_path(signature, "openai", "gpt-4o")
+        assert not reloaded.is_exhausted_path(signature, "anthropic", "claude")

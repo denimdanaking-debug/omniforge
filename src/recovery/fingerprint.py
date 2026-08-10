@@ -18,6 +18,7 @@ from src.context.validation import ContextPacketValidator
 from src.providers.identity import ProviderQuotaState
 from src.recovery.eligibility import _effective_quota
 from src.recovery.failure_classification import FailureClassification
+from src.risk.context_policy import RiskContextPolicy, RiskContextRequirements
 from src.security.redaction import redact
 
 
@@ -152,35 +153,57 @@ def _exclusions_dict(exclusions: tuple[Any, ...]) -> list[dict[str, Any]]:
     )
 
 
+def effective_risk_context_requirements(
+    inputs: Any,
+) -> RiskContextRequirements:
+    """Return the effective risk context requirements using coordinator precedence.
+
+    Precedence:
+    1. Explicitly supplied risk_context_requirements.
+    2. Supplied risk_context_policy.requirements_for(current_risk).
+    3. RiskContextPolicy.default().requirements_for(current_risk).
+    """
+    explicit: RiskContextRequirements | None = inputs.risk_context_requirements
+    if explicit is not None:
+        return explicit
+    policy: RiskContextPolicy | None = inputs.risk_context_policy
+    if policy is not None:
+        result: RiskContextRequirements = policy.requirements_for(inputs.current_risk)
+        return result
+    default: RiskContextRequirements = RiskContextPolicy.default().requirements_for(
+        inputs.current_risk
+    )
+    return default
+
+
+def _risk_context_requirements_dict(requirements: RiskContextRequirements) -> dict[str, Any]:
+    """Return deterministic decision-driving requirement fields."""
+    return {
+        "strategy_preference": requirements.strategy_preference,
+        "authority_required": requirements.authority_required,
+        "require_raw_authority": requirements.require_raw_authority,
+        "include_test_evidence": requirements.include_test_evidence,
+        "include_historical_findings": requirements.include_historical_findings,
+        "budget_multiplier": requirements.budget_multiplier,
+    }
+
+
 def _context_authority_fingerprint(inputs: Any) -> dict[str, Any] | None:
     """Return deterministic context-authority decision inputs.
 
-    Includes the packet identity, risk requirements, and canonical Phase 7
-    validation outcome. Material authority differences therefore change the
-    recovery input fingerprint.
+    Uses the SAME effective RiskContextRequirements as the coordinator for
+    validation. Material authority differences therefore change the recovery
+    input fingerprint.
     """
     packet: ContextPacket | None = inputs.context_packet
-    requirements = inputs.risk_context_requirements
-    policy = inputs.risk_context_policy
+    requirements = effective_risk_context_requirements(inputs)
 
-    req_dict: dict[str, Any] | None = None
-    if requirements is not None:
-        req_dict = {
-            "strategy_preference": requirements.strategy_preference,
-            "authority_required": requirements.authority_required,
-            "require_raw_authority": requirements.require_raw_authority,
-            "budget_multiplier": requirements.budget_multiplier,
-        }
-
-    policy_dict: dict[str, Any] | None = None
-    if policy is not None:
-        policy_dict = {"override_keys": sorted(policy._overrides.keys())}
+    req_dict = _risk_context_requirements_dict(requirements)
 
     if packet is None:
         return {
             "packet_present": False,
             "requirements": req_dict,
-            "policy": policy_dict,
             "validation": None,
         }
 
@@ -188,17 +211,16 @@ def _context_authority_fingerprint(inputs: Any) -> dict[str, Any] | None:
     issue_dicts = [{"severity": issue.severity, "code": issue.code} for issue in issues]
     has_error = any(issue["severity"] == "error" for issue in issue_dicts)
     authority_safe = not has_error
-    if requirements is not None:
-        if (
-            requirements.require_raw_authority
-            and packet.authority_presence is not AuthorityPresence.RAW_INCLUDED
-        ):
-            authority_safe = False
-        if (
-            requirements.authority_required
-            and packet.authority_presence is AuthorityPresence.NOT_REQUIRED
-        ):
-            authority_safe = False
+    if (
+        requirements.require_raw_authority
+        and packet.authority_presence is not AuthorityPresence.RAW_INCLUDED
+    ):
+        authority_safe = False
+    if (
+        requirements.authority_required
+        and packet.authority_presence is AuthorityPresence.NOT_REQUIRED
+    ):
+        authority_safe = False
 
     return {
         "packet_present": True,
@@ -207,7 +229,6 @@ def _context_authority_fingerprint(inputs: Any) -> dict[str, Any] | None:
         "raw_item_count": packet.raw_item_count,
         "summary_count": packet.summary_count,
         "requirements": req_dict,
-        "policy": policy_dict,
         "validation": {
             "issues": sorted(issue_dicts, key=lambda d: (d["code"], d["severity"])),
             "safe": authority_safe,

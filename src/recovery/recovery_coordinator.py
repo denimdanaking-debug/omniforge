@@ -31,7 +31,7 @@ from src.recovery.failure_classification import (
     FailureClassifier,
     FailureClassifierInput,
 )
-from src.recovery.fingerprint import recovery_input_fingerprint
+from src.recovery.fingerprint import effective_risk_context_requirements, recovery_input_fingerprint
 from src.recovery.retry_policy import FailureRecoveryPolicy
 from src.recovery.retry_state import FailureAttemptRecord, RetryLedger, RetryType, WaitState
 from src.recovery.state_machine import RouteRecoveryState
@@ -282,10 +282,10 @@ class RecoveryCoordinator:
         now = timestamp or self._now()
         retry_type = self._retry_type_for_action(decision.action)
 
-        candidate = decision.selected_candidate or self._current_candidate(inputs)
-        provider_id = candidate.provider_id if candidate is not None else None
-        model_id = candidate.model_id if candidate is not None else None
-        route_id = candidate.route_id if candidate is not None else None
+        destination = decision.selected_candidate or self._current_candidate(inputs)
+        provider_id = destination.provider_id if destination is not None else None
+        model_id = destination.model_id if destination is not None else None
+        route_id = destination.route_id if destination is not None else None
 
         record = FailureAttemptRecord(
             attempt_index=ledger.total_attempt_index,
@@ -310,7 +310,11 @@ class RecoveryCoordinator:
             ledger.current_context_rebuild["rebuild_number"] = ledger.context_rebuild_count()
 
         if decision.terminal or self._retry_path_exhausted(decision, inputs):
-            ledger.mark_exhausted_path(decision.failure_signature, provider_id, model_id)
+            source = self._source_candidate(inputs)
+            if source is not None:
+                ledger.mark_exhausted_path(
+                    decision.failure_signature, source.provider_id, source.model_id
+                )
 
         if decision.action is not RecoveryAction.WAIT_FOR_PROVIDER:
             ledger.clear_wait()
@@ -1360,6 +1364,18 @@ class RecoveryCoordinator:
             return self._ordered_candidates(inputs)[0]
         raise ValueError("no current candidate available")
 
+    def _source_candidate(self, inputs: RecoveryCoordinatorInput) -> RecoveryCandidate | None:
+        """Return the candidate identity that actually failed.
+
+        The source is resolved from the classifier failure identity, falling back
+        to the canonical current candidate. It must NOT be the destination of a
+        reroute. Returns None only when no source identity can be determined.
+        """
+        try:
+            return self._current_candidate(inputs)
+        except ValueError:
+            return None
+
     def _ledger_has_exhausted_path(
         self,
         signature: str,
@@ -1471,12 +1487,8 @@ class RecoveryCoordinator:
 
     def _risk_context_requirements(
         self, inputs: RecoveryCoordinatorInput
-    ) -> RiskContextRequirements | None:
-        if inputs.risk_context_requirements is not None:
-            return inputs.risk_context_requirements
-        if inputs.risk_context_policy is not None:
-            return inputs.risk_context_policy.requirements_for(inputs.current_risk)
-        return RiskContextPolicy.default().requirements_for(inputs.current_risk)
+    ) -> RiskContextRequirements:
+        return effective_risk_context_requirements(inputs)
 
     def _context_authority_validation(
         self, inputs: RecoveryCoordinatorInput
@@ -1523,11 +1535,10 @@ class RecoveryCoordinator:
     def _context_authority_safe(self, inputs: RecoveryCoordinatorInput) -> bool:
         packet = inputs.context_packet
         requirements = self._risk_context_requirements(inputs)
-        authority_required = requirements.authority_required if requirements is not None else False
         if packet is None:
             # Legacy non-authority contexts may proceed without a typed packet.
             # Any context where authority is required must supply a Phase 7 packet.
-            if not authority_required:
+            if not requirements.authority_required:
                 meta = inputs.classifier_input.context_overflow
                 if meta is None:
                     return True

@@ -11,7 +11,7 @@ from src.policy.risk import RiskLevel
 from src.providers.errors import ProviderError, ProviderErrorCode
 from src.providers.identity import ProviderHealth, ProviderQuotaState, QuotaSignal
 from src.recovery import FixedClock
-from src.recovery.failure_classification import FailureClassifierInput
+from src.recovery.failure_classification import ContextOverflowMetadata, FailureClassifierInput
 from src.recovery.failure_domain import FailureDomainIndex
 from src.recovery.fingerprint import recovery_input_fingerprint
 from src.recovery.recovery_coordinator import (
@@ -23,7 +23,7 @@ from src.recovery.reserve import ReserveCapacityPolicy
 from src.recovery.retry_policy import FailureRecoveryPolicy
 from src.recovery.retry_state import RetryLedger, RetryType
 from src.recovery.state_machine import RouteRecoveryState
-from src.risk.context_policy import RiskContextRequirements
+from src.risk.context_policy import RiskContextPolicy, RiskContextRequirements
 from src.routing.capabilities import ModelCapabilities
 from src.routing.inference_route import InferenceRouteIdentity, RouteType
 from src.routing.model_identity import ModelIdentity
@@ -496,3 +496,192 @@ class TestContextAuthorityFingerprint:
         d1 = RecoveryCoordinator(clock=clock).decide(inputs1)
         d2 = RecoveryCoordinator(clock=clock).decide(inputs2)
         assert d1.deterministic_input_fingerprint != d2.deterministic_input_fingerprint
+
+
+class TestEffectiveContextRequirementsFingerprint:
+    def _overflow_inputs(
+        self,
+        clock: FixedClock,
+        risk_context_requirements: RiskContextRequirements | None = None,
+        risk_context_policy: RiskContextPolicy | None = None,
+        current_risk: RiskLevel = RiskLevel.R3_HIGH,
+    ) -> RecoveryCoordinatorInput:
+        return _base_inputs(
+            clock,
+            classifier_input=FailureClassifierInput(
+                task_id="task-1",
+                role=ExecutionRole.CODING,
+                context_overflow=ContextOverflowMetadata(
+                    estimated_input_chars=160_000,
+                    model_context_tokens=16_000,
+                    authority_required=True,
+                    authority_items_raw=1,
+                ),
+                provider_id="openai",
+                model_id="gpt-4o",
+                route_id="openai-direct",
+            ),
+            context_packet=_valid_raw_authority_packet(),
+            risk_context_requirements=risk_context_requirements,
+            risk_context_policy=risk_context_policy,
+            current_risk=current_risk,
+        )
+
+    def test_same_override_key_different_require_raw_authority_changes_fingerprint(
+        self, clock: FixedClock
+    ) -> None:
+        # R2 base has require_raw_authority=False; override can strengthen it.
+        policy1 = RiskContextPolicy(
+            overrides={
+                "R2_NORMAL": {
+                    "strategy_preference": "large_context",
+                    "authority_required": True,
+                    "require_raw_authority": True,
+                    "include_test_evidence": False,
+                    "include_historical_findings": False,
+                    "budget_multiplier": 2.0,
+                    "rationale": "a",
+                }
+            }
+        )
+        policy2 = RiskContextPolicy(
+            overrides={
+                "R2_NORMAL": {
+                    "strategy_preference": "large_context",
+                    "authority_required": True,
+                    "require_raw_authority": False,
+                    "include_test_evidence": False,
+                    "include_historical_findings": False,
+                    "budget_multiplier": 2.0,
+                    "rationale": "a",
+                }
+            }
+        )
+        inputs1 = self._overflow_inputs(
+            clock, risk_context_policy=policy1, current_risk=RiskLevel.R2_NORMAL
+        )
+        inputs2 = self._overflow_inputs(
+            clock, risk_context_policy=policy2, current_risk=RiskLevel.R2_NORMAL
+        )
+        d1 = RecoveryCoordinator(clock=clock).decide(inputs1)
+        d2 = RecoveryCoordinator(clock=clock).decide(inputs2)
+        assert d1.deterministic_input_fingerprint != d2.deterministic_input_fingerprint
+
+    def test_same_override_key_different_authority_required_changes_fingerprint(
+        self, clock: FixedClock
+    ) -> None:
+        # R1 base has authority_required=False; override can strengthen it.
+        policy1 = RiskContextPolicy(
+            overrides={
+                "R1_LOW": {
+                    "strategy_preference": "hybrid",
+                    "authority_required": True,
+                    "require_raw_authority": False,
+                    "budget_multiplier": 1.0,
+                    "rationale": "a",
+                }
+            }
+        )
+        policy2 = RiskContextPolicy(
+            overrides={
+                "R1_LOW": {
+                    "strategy_preference": "hybrid",
+                    "authority_required": False,
+                    "require_raw_authority": False,
+                    "budget_multiplier": 1.0,
+                    "rationale": "a",
+                }
+            }
+        )
+        inputs1 = self._overflow_inputs(
+            clock, risk_context_policy=policy1, current_risk=RiskLevel.R1_LOW
+        )
+        inputs2 = self._overflow_inputs(
+            clock, risk_context_policy=policy2, current_risk=RiskLevel.R1_LOW
+        )
+        d1 = RecoveryCoordinator(clock=clock).decide(inputs1)
+        d2 = RecoveryCoordinator(clock=clock).decide(inputs2)
+        assert d1.deterministic_input_fingerprint != d2.deterministic_input_fingerprint
+
+    def test_same_override_key_different_strategy_budget_changes_fingerprint(
+        self, clock: FixedClock
+    ) -> None:
+        policy1 = RiskContextPolicy(
+            overrides={
+                "R2_NORMAL": {
+                    "strategy_preference": "large_context",
+                    "authority_required": True,
+                    "require_raw_authority": True,
+                    "budget_multiplier": 2.0,
+                    "rationale": "a",
+                }
+            }
+        )
+        policy2 = RiskContextPolicy(
+            overrides={
+                "R2_NORMAL": {
+                    "strategy_preference": "targeted",
+                    "authority_required": True,
+                    "require_raw_authority": True,
+                    "budget_multiplier": 1.0,
+                    "rationale": "b",
+                }
+            }
+        )
+        inputs1 = self._overflow_inputs(
+            clock, risk_context_policy=policy1, current_risk=RiskLevel.R2_NORMAL
+        )
+        inputs2 = self._overflow_inputs(
+            clock, risk_context_policy=policy2, current_risk=RiskLevel.R2_NORMAL
+        )
+        d1 = RecoveryCoordinator(clock=clock).decide(inputs1)
+        d2 = RecoveryCoordinator(clock=clock).decide(inputs2)
+        assert d1.deterministic_input_fingerprint != d2.deterministic_input_fingerprint
+
+    def test_default_derived_equals_explicit_equivalent_requirements(
+        self, clock: FixedClock
+    ) -> None:
+        policy = RiskContextPolicy.default()
+        explicit = policy.requirements_for(RiskLevel.R3_HIGH)
+        inputs1 = self._overflow_inputs(
+            clock, risk_context_policy=policy, current_risk=RiskLevel.R3_HIGH
+        )
+        inputs2 = self._overflow_inputs(
+            clock, risk_context_requirements=explicit, current_risk=RiskLevel.R3_HIGH
+        )
+        d1 = RecoveryCoordinator(clock=clock).decide(inputs1)
+        d2 = RecoveryCoordinator(clock=clock).decide(inputs2)
+        assert d1.deterministic_input_fingerprint == d2.deterministic_input_fingerprint
+
+    def test_policy_dict_ordering_does_not_change_fingerprint(self, clock: FixedClock) -> None:
+        policy1 = RiskContextPolicy(
+            overrides={
+                "R2_NORMAL": {
+                    "strategy_preference": "large_context",
+                    "authority_required": True,
+                    "require_raw_authority": True,
+                    "budget_multiplier": 2.0,
+                    "rationale": "a",
+                }
+            }
+        )
+        policy2 = RiskContextPolicy(
+            overrides={
+                "R2_NORMAL": {
+                    "budget_multiplier": 2.0,
+                    "require_raw_authority": True,
+                    "strategy_preference": "large_context",
+                    "authority_required": True,
+                    "rationale": "a",
+                }
+            }
+        )
+        inputs1 = self._overflow_inputs(
+            clock, risk_context_policy=policy1, current_risk=RiskLevel.R2_NORMAL
+        )
+        inputs2 = self._overflow_inputs(
+            clock, risk_context_policy=policy2, current_risk=RiskLevel.R2_NORMAL
+        )
+        d1 = RecoveryCoordinator(clock=clock).decide(inputs1)
+        d2 = RecoveryCoordinator(clock=clock).decide(inputs2)
+        assert d1.deterministic_input_fingerprint == d2.deterministic_input_fingerprint
