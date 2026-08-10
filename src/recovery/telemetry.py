@@ -28,6 +28,19 @@ class RecoveryEventType(StrEnum):
     RESERVE_PROTECTED = "reserve_protected"
     RESERVE_CONSUMED = "reserve_consumed"
     DOMAIN_OUTAGE_DETECTED = "domain_outage_detected"
+    FAILURE_CLASSIFIED = "failure_classified"
+    TRANSIENT_RETRY_SCHEDULED = "transient_retry_scheduled"
+    PROVIDER_REROUTED = "provider_rerouted"
+    QUOTA_WAIT_ENTERED = "quota_wait_entered"
+    STRUCTURED_OUTPUT_RETRY = "structured_output_retry"
+    PLANNING_REJECTED = "planning_rejected"
+    IMPLEMENTATION_REPAIR_REQUESTED = "implementation_repair_requested"
+    CROSS_MODEL_ESCALATION = "cross_model_escalation"
+    CONTEXT_REBUILT = "context_rebuilt"
+    AUTHORITY_VIOLATION_BLOCKED = "authority_violation_blocked"
+    RETRY_LIMIT_REACHED = "retry_limit_reached"
+    RETRY_STORM_PREVENTED = "retry_storm_prevented"
+    RECOVERY_RESUMED = "recovery_resumed"
 
 
 @dataclass(frozen=True)

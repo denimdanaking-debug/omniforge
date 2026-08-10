@@ -11,7 +11,7 @@ from typing import Any
 from src.routing.policy import ProjectRoutingPolicy, RoutingPin
 from src.security.redaction import SENSITIVE_STRUCTURED_KEYS, _normalize_key
 
-CURRENT_CONFIG_SCHEMA_VERSION = "1.3.0"
+CURRENT_CONFIG_SCHEMA_VERSION = "1.4.0"
 SUPPORTED_CONFIG_SCHEMA_VERSIONS = frozenset({CURRENT_CONFIG_SCHEMA_VERSION})
 
 Migration = Callable[[dict[str, Any]], dict[str, Any]]
@@ -95,6 +95,21 @@ def _migrate_1_2_0_to_1_3_0(old: dict[str, Any]) -> dict[str, Any]:
     for policy in project_policies.values():
         if isinstance(policy, dict):
             policy.setdefault("risk_policy", {})
+    router_config = working.setdefault("router_config", {})
+    router_config.setdefault("exploration_enabled", False)
+    return working
+
+
+@register_migration("1.3.0", "1.4.0")
+def _migrate_1_3_0_to_1_4_0(old: dict[str, Any]) -> dict[str, Any]:
+    """Add Phase 10 failure recovery policy with safe defaults."""
+    from src.recovery.retry_policy import FailureRecoveryPolicy
+
+    working = copy.deepcopy(old)
+    working.setdefault("routing_mode", "legacy")
+    working.setdefault("exploration_enabled", False)
+    working.setdefault("dynamic_routing_enabled", False)
+    working.setdefault("recovery_policy", FailureRecoveryPolicy().to_dict())
     router_config = working.setdefault("router_config", {})
     router_config.setdefault("exploration_enabled", False)
     return working
@@ -345,6 +360,9 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
     risk_policy = working.get("risk_policy", {})
     _validate_risk_policy("risk_policy", risk_policy)
 
+    recovery_policy = working.get("recovery_policy", {})
+    _validate_recovery_policy("recovery_policy", recovery_policy)
+
     return working
 
 
@@ -366,6 +384,17 @@ def _validate_risk_policy(path: str, value: Any) -> None:
         raise InvalidConfiguration(f"{path} must be an object")
     try:
         ProjectRiskPolicy.from_dict(value)
+    except ValueError as exc:
+        raise InvalidConfiguration(f"{path} is invalid: {exc}") from exc
+
+
+def _validate_recovery_policy(path: str, value: Any) -> None:
+    from src.recovery.retry_policy import FailureRecoveryPolicy
+
+    if not isinstance(value, dict):
+        raise InvalidConfiguration(f"{path} must be an object")
+    try:
+        FailureRecoveryPolicy.from_dict(value)
     except ValueError as exc:
         raise InvalidConfiguration(f"{path} is invalid: {exc}") from exc
 
@@ -414,6 +443,7 @@ def extract_administrative_state(config: Mapping[str, Any]) -> dict[str, Any]:
         "pins": working.get("pins", {}),
         "project_policies": copy.deepcopy(working.get("project_policies", {})),
         "router_config": copy.deepcopy(working.get("router_config", {})),
+        "recovery_policy": copy.deepcopy(working.get("recovery_policy", {})),
     }
 
 

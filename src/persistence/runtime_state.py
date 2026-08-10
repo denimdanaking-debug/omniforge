@@ -17,7 +17,7 @@ from src.routing.roles import ExecutionRole
 from src.security.redaction import redact
 from src.security.secrets import SecretValue
 
-CURRENT_RUNTIME_STATE_VERSION = "1.3.0"
+CURRENT_RUNTIME_STATE_VERSION = "1.4.0"
 RuntimeMigration = Callable[[dict[str, Any]], dict[str, Any]]
 _RUNTIME_MIGRATIONS: dict[str, tuple[str, RuntimeMigration]] = {}
 
@@ -113,6 +113,14 @@ def _migrate_runtime_1_2_0_to_1_3_0(old: dict[str, Any]) -> dict[str, Any]:
     """Add Phase 9 risk engine task state with safe defaults."""
     working = copy.deepcopy(old)
     working.setdefault("task_risk_state", {})
+    return working
+
+
+@register_runtime_migration("1.3.0", "1.4.0")
+def _migrate_runtime_1_3_0_to_1_4_0(old: dict[str, Any]) -> dict[str, Any]:
+    """Add Phase 10 task retry state with safe defaults."""
+    working = copy.deepcopy(old)
+    working.setdefault("task_retry_state", {})
     return working
 
 
@@ -437,6 +445,38 @@ def _validate_waiting_tasks(value: Any) -> None:
             )
 
 
+def _validate_task_retry_state(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise CorruptRuntimeState(
+            RuntimeStateDiagnostic("INVALID_TASK_RETRY_STATE", "task_retry_state must be an object")
+        )
+    for task_id, entry in value.items():
+        if not isinstance(task_id, str) or not task_id:
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_TASK_RETRY_TASK_ID", "task_retry_state keys must be non-empty strings"
+                )
+            )
+        if not isinstance(entry, dict):
+            raise CorruptRuntimeState(
+                RuntimeStateDiagnostic(
+                    "INVALID_TASK_RETRY_ENTRY",
+                    f"task_retry_state.{task_id} must be an object",
+                )
+            )
+        for field_name in ("records", "current_wait", "current_context_rebuild", "exhausted_paths"):
+            value = entry.get(field_name)
+            if value is None and field_name == "current_wait":
+                continue
+            if value is not None and not isinstance(value, (list, dict)):
+                raise CorruptRuntimeState(
+                    RuntimeStateDiagnostic(
+                        "INVALID_TASK_RETRY_FIELD",
+                        f"task_retry_state.{task_id}.{field_name} has invalid type",
+                    )
+                )
+
+
 def validate_runtime_state(state: Mapping[str, Any]) -> dict[str, Any]:
     working = migrate_runtime_state(state)
 
@@ -489,6 +529,9 @@ def validate_runtime_state(state: Mapping[str, Any]) -> dict[str, Any]:
     _validate_failure_domain_index(working.get("failure_domain_index", {}))
     _validate_scheduler(working.get("recovery_scheduler", {}))
     _validate_waiting_tasks(working.get("waiting_tasks", {}))
+
+    # Phase 10 task retry state.
+    _validate_task_retry_state(working.get("task_retry_state", {}))
 
     return working
 
