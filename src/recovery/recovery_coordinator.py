@@ -282,6 +282,10 @@ class RecoveryCoordinator:
         now = timestamp or self._now()
         retry_type = self._retry_type_for_action(decision.action)
 
+        # Resolve the historical source identity BEFORE any pin-dependent dispatch.
+        source = self._resolve_failure_source(inputs)
+        source_resolved = source is not None
+
         destination = decision.selected_candidate or self._current_candidate(inputs)
         provider_id = destination.provider_id if destination is not None else None
         model_id = destination.model_id if destination is not None else None
@@ -302,6 +306,7 @@ class RecoveryCoordinator:
             context_rebuild_number=ledger.context_rebuild_count(),
             repair_number=ledger.repair_count(),
             transition_fingerprint=transition_fingerprint,
+            source_identity_resolved=source_resolved,
         )
         ledger.records.append(record)
 
@@ -309,12 +314,11 @@ class RecoveryCoordinator:
             ledger.current_context_rebuild = dict(self._context_evidence(inputs))
             ledger.current_context_rebuild["rebuild_number"] = ledger.context_rebuild_count()
 
-        if decision.terminal or self._retry_path_exhausted(decision, inputs):
-            source = self._source_candidate(inputs)
-            if source is not None:
-                ledger.mark_exhausted_path(
-                    decision.failure_signature, source.provider_id, source.model_id
-                )
+        should_exhaust = decision.terminal or self._retry_path_exhausted(decision, inputs)
+        if should_exhaust and source is not None:
+            ledger.mark_exhausted_path(
+                decision.failure_signature, source.provider_id, source.model_id
+            )
 
         if decision.action is not RecoveryAction.WAIT_FOR_PROVIDER:
             ledger.clear_wait()
@@ -1364,17 +1368,42 @@ class RecoveryCoordinator:
             return self._ordered_candidates(inputs)[0]
         raise ValueError("no current candidate available")
 
-    def _source_candidate(self, inputs: RecoveryCoordinatorInput) -> RecoveryCandidate | None:
-        """Return the candidate identity that actually failed.
+    def _resolve_failure_source(self, inputs: RecoveryCoordinatorInput) -> RecoveryCandidate | None:
+        """Resolve the historical candidate that actually failed.
 
-        The source is resolved from the classifier failure identity, falling back
-        to the canonical current candidate. It must NOT be the destination of a
-        reroute. Returns None only when no source identity can be determined.
+        Uses classifier_input provider_id/model_id/route_id as the authoritative
+        failure identity. Does NOT apply the current RoutingPin. Returns a
+        candidate only when the identity resolves uniquely; otherwise returns None.
         """
-        try:
-            return self._current_candidate(inputs)
-        except ValueError:
+        classifier_input = inputs.classifier_input
+        provider_id = classifier_input.provider_id
+        model_id = classifier_input.model_id
+        route_id = classifier_input.route_id
+
+        if provider_id is None and model_id is None and route_id is None:
             return None
+
+        # Complete identity: require an exact match.
+        if provider_id is not None and model_id is not None and route_id is not None:
+            for candidate in inputs.candidates:
+                if (
+                    candidate.provider_id == provider_id
+                    and candidate.model_id == model_id
+                    and candidate.route_id == route_id
+                ):
+                    return candidate
+            return None
+
+        # Partial identity: require a unique match against the supplied parts.
+        matches: list[RecoveryCandidate] = []
+        for candidate in inputs.candidates:
+            provider_match = provider_id is None or candidate.provider_id == provider_id
+            model_match = model_id is None or candidate.model_id == model_id
+            route_match = route_id is None or candidate.route_id == route_id
+            if provider_match and model_match and route_match:
+                matches.append(candidate)
+
+        return matches[0] if len(matches) == 1 else None
 
     def _ledger_has_exhausted_path(
         self,

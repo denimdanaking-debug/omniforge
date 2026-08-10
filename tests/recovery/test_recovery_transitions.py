@@ -29,6 +29,7 @@ from src.risk.context_policy import RiskContextRequirements
 from src.routing.capabilities import ModelCapabilities
 from src.routing.inference_route import InferenceRouteIdentity, RouteType
 from src.routing.model_identity import ModelIdentity
+from src.routing.policy import RoutingPin
 from src.routing.roles import ExecutionRole
 
 
@@ -423,3 +424,197 @@ class TestSourceDestinationExhaustion:
         reloaded = RetryLedger.from_dict(ledger.to_dict())
         assert reloaded.is_exhausted_path(signature, "openai", "gpt-4o")
         assert not reloaded.is_exhausted_path(signature, "anthropic", "claude")
+
+
+class TestFailureSourceResolution:
+    """Historical failure-source identity must be resolved independently of dispatch pins."""
+
+    def _make_source_test_input(
+        self,
+        clock: FixedClock,
+        ledger: RetryLedger,
+        *,
+        pin: RoutingPin | None = None,
+        provider_id: str | None = "openai",
+        model_id: str | None = "gpt-4o",
+        route_id: str | None = "openai-direct",
+        candidates: tuple[RecoveryCandidate, ...] | None = None,
+    ) -> RecoveryCoordinatorInput:
+        classifier_input = FailureClassifierInput(
+            task_id="task-1",
+            role=ExecutionRole.CODING,
+            deterministic_validation=ValidationResultSummary(
+                validator="pytest",
+                passed=False,
+                failing_check_names=("test_foo",),
+                exit_status=1,
+            ),
+            provider_id=provider_id,
+            model_id=model_id,
+            route_id=route_id,
+        )
+        if candidates is None:
+            candidates = (
+                _candidate("openai", "gpt-4o", "openai-direct"),
+                _candidate("anthropic", "claude", "anthropic-direct"),
+            )
+        return RecoveryCoordinatorInput(
+            classifier_input=classifier_input,
+            candidates=candidates,
+            ledger=ledger,
+            policy=FailureRecoveryPolicy(max_same_model_repairs=0),
+            current_risk=RiskLevel.R2_NORMAL,
+            role=ExecutionRole.CODING,
+            pin=pin,
+        )
+
+    def test_pin_change_to_destination_does_not_exhaust_destination(
+        self, clock: FixedClock
+    ) -> None:
+        """A: A fails; pin later points to B. A must be exhausted, not B."""
+        ledger = RetryLedger("task-1")
+        inputs_before_pin = self._make_source_test_input(clock, ledger, pin=None)
+        coordinator = RecoveryCoordinator(clock=clock)
+        decision = coordinator.decide(inputs_before_pin)
+
+        assert decision.action is RecoveryAction.CROSS_MODEL_REPAIR
+        assert decision.selected_candidate is not None
+        assert decision.selected_candidate.model_id == "claude"
+
+        # Pin changes to B before the transition is committed.
+        pin = RoutingPin(provider_id="anthropic", model_id="claude", route_id="anthropic-direct")
+        inputs_after_pin = self._make_source_test_input(clock, ledger, pin=pin)
+        coordinator.apply_decision(inputs_after_pin, decision)
+
+        signature = decision.failure_signature
+        assert ledger.is_exhausted_path(signature, "openai", "gpt-4o")
+        assert not ledger.is_exhausted_path(signature, "anthropic", "claude")
+        record = ledger.last_record()
+        assert record is not None
+        assert record.source_identity_resolved is True
+
+    def test_complete_identity_missing_candidate_does_not_fallback(self, clock: FixedClock) -> None:
+        """B: Complete source identity A but A is absent from candidates."""
+        ledger = RetryLedger("task-1")
+        candidates = (_candidate("anthropic", "claude", "anthropic-direct"),)
+        inputs = self._make_source_test_input(
+            clock,
+            ledger,
+            candidates=candidates,
+            provider_id="openai",
+            model_id="gpt-4o",
+            route_id="openai-direct",
+        )
+        coordinator = RecoveryCoordinator(clock=clock)
+        decision = coordinator.decide_and_record(inputs)
+        signature = decision.failure_signature
+
+        assert not ledger.is_exhausted_path(signature, "openai", "gpt-4o")
+        assert not ledger.is_exhausted_path(signature, "anthropic", "claude")
+        record = ledger.last_record()
+        assert record is not None
+        assert record.source_identity_resolved is False
+
+    def test_unique_partial_identity_resolves_source(self, clock: FixedClock) -> None:
+        """C: Partial identity uniquely identifies the failing candidate."""
+        ledger = RetryLedger("task-1")
+        inputs = self._make_source_test_input(
+            clock,
+            ledger,
+            provider_id="openai",
+            model_id=None,
+            route_id=None,
+        )
+        coordinator = RecoveryCoordinator(clock=clock)
+        decision = coordinator.decide_and_record(inputs)
+        signature = decision.failure_signature
+
+        assert ledger.is_exhausted_path(signature, "openai", "gpt-4o")
+        assert not ledger.is_exhausted_path(signature, "anthropic", "claude")
+        record = ledger.last_record()
+        assert record is not None
+        assert record.source_identity_resolved is True
+
+    def test_ambiguous_partial_identity_does_not_resolve(self, clock: FixedClock) -> None:
+        """D: Partial identity matches more than one candidate."""
+        ledger = RetryLedger("task-1")
+        candidates = (
+            _candidate("openai", "gpt-4o", "openai-direct"),
+            _candidate("openai", "gpt-4o-mini", "openai-direct"),
+            _candidate("anthropic", "claude", "anthropic-direct"),
+        )
+        inputs = self._make_source_test_input(
+            clock,
+            ledger,
+            provider_id="openai",
+            model_id=None,
+            route_id=None,
+            candidates=candidates,
+        )
+        coordinator = RecoveryCoordinator(clock=clock)
+        decision = coordinator.decide_and_record(inputs)
+        signature = decision.failure_signature
+
+        assert not ledger.is_exhausted_path(signature, "openai", "gpt-4o")
+        assert not ledger.is_exhausted_path(signature, "openai", "gpt-4o-mini")
+        assert not ledger.is_exhausted_path(signature, "anthropic", "claude")
+        record = ledger.last_record()
+        assert record is not None
+        assert record.source_identity_resolved is False
+
+    def test_missing_identity_does_not_resolve(self, clock: FixedClock) -> None:
+        """E: No provider/model/route identity in classifier input."""
+        ledger = RetryLedger("task-1")
+        inputs = self._make_source_test_input(
+            clock,
+            ledger,
+            provider_id=None,
+            model_id=None,
+            route_id=None,
+        )
+        coordinator = RecoveryCoordinator(clock=clock)
+        decision = coordinator.decide_and_record(inputs)
+        signature = decision.failure_signature
+
+        assert not ledger.is_exhausted_path(signature, "openai", "gpt-4o")
+        assert not ledger.is_exhausted_path(signature, "anthropic", "claude")
+        record = ledger.last_record()
+        assert record is not None
+        assert record.source_identity_resolved is False
+
+    def test_source_attribution_independent_of_candidate_order(self, clock: FixedClock) -> None:
+        """F: Candidate ordering must not change historical source attribution."""
+        ledger = RetryLedger("task-1")
+        candidates = (
+            _candidate("anthropic", "claude", "anthropic-direct"),
+            _candidate("openai", "gpt-4o", "openai-direct"),
+        )
+        inputs = self._make_source_test_input(
+            clock,
+            ledger,
+            candidates=candidates,
+            provider_id="openai",
+            model_id="gpt-4o",
+            route_id="openai-direct",
+        )
+        coordinator = RecoveryCoordinator(clock=clock)
+        decision = coordinator.decide_and_record(inputs)
+        signature = decision.failure_signature
+
+        assert ledger.is_exhausted_path(signature, "openai", "gpt-4o")
+        assert not ledger.is_exhausted_path(signature, "anthropic", "claude")
+
+    def test_source_exhaustion_survives_restart(self, clock: FixedClock) -> None:
+        """H: Resolved source exhaustion must survive serialization/restart."""
+        ledger = RetryLedger("task-1")
+        inputs = self._make_source_test_input(clock, ledger)
+        coordinator = RecoveryCoordinator(clock=clock)
+        decision = coordinator.decide_and_record(inputs)
+        signature = decision.failure_signature
+
+        reloaded = RetryLedger.from_dict(ledger.to_dict())
+        assert reloaded.is_exhausted_path(signature, "openai", "gpt-4o")
+        assert not reloaded.is_exhausted_path(signature, "anthropic", "claude")
+        record = reloaded.last_record()
+        assert record is not None
+        assert record.source_identity_resolved is True

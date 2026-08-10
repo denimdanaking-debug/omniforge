@@ -51,6 +51,7 @@ class FailureAttemptRecord:
     context_rebuild_number: int = 0
     repair_number: int = 0
     transition_fingerprint: str = ""
+    source_identity_resolved: bool = False
 
     def __post_init__(self) -> None:
         if self.attempt_index < 0:
@@ -76,6 +77,7 @@ class FailureAttemptRecord:
             "context_rebuild_number": self.context_rebuild_number,
             "repair_number": self.repair_number,
             "transition_fingerprint": self.transition_fingerprint,
+            "source_identity_resolved": self.source_identity_resolved,
         }
 
     @classmethod
@@ -101,6 +103,7 @@ class FailureAttemptRecord:
             context_rebuild_number=int(data.get("context_rebuild_number", 0)),
             repair_number=int(data.get("repair_number", 0)),
             transition_fingerprint=str(data.get("transition_fingerprint", "")),
+            source_identity_resolved=bool(data.get("source_identity_resolved", False)),
         )
 
 
