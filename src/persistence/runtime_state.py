@@ -17,7 +17,7 @@ from src.routing.roles import ExecutionRole
 from src.security.redaction import redact
 from src.security.secrets import SecretValue
 
-CURRENT_RUNTIME_STATE_VERSION = "1.4.0"
+CURRENT_RUNTIME_STATE_VERSION = "1.5.0"
 RuntimeMigration = Callable[[dict[str, Any]], dict[str, Any]]
 _RUNTIME_MIGRATIONS: dict[str, tuple[str, RuntimeMigration]] = {}
 
@@ -121,6 +121,18 @@ def _migrate_runtime_1_3_0_to_1_4_0(old: dict[str, Any]) -> dict[str, Any]:
     """Add Phase 10 task retry state with safe defaults."""
     working = copy.deepcopy(old)
     working.setdefault("task_retry_state", {})
+    return working
+
+
+@register_runtime_migration("1.4.0", "1.5.0")
+def _migrate_runtime_1_4_0_to_1_5_0(old: dict[str, Any]) -> dict[str, Any]:
+    """Add Phase 11 empirical model-intelligence state with safe defaults.
+
+    Preserves all Phase 10 task retry state. Performance events and derived
+    statistics are stored separately from authority and recovery state.
+    """
+    working = copy.deepcopy(old)
+    working.setdefault("performance_statistics", {})
     return working
 
 
@@ -477,6 +489,30 @@ def _validate_task_retry_state(value: Any) -> None:
                 )
 
 
+def _validate_performance_statistics(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise CorruptRuntimeState(
+            RuntimeStateDiagnostic(
+                "INVALID_PERFORMANCE_STATISTICS", "performance_statistics must be an object"
+            )
+        )
+    ledger = value.get("ledger")
+    if ledger is not None and not isinstance(ledger, dict):
+        raise CorruptRuntimeState(
+            RuntimeStateDiagnostic(
+                "INVALID_PERFORMANCE_LEDGER", "performance_statistics.ledger must be an object"
+            )
+        )
+    statistics = value.get("statistics")
+    if statistics is not None and not isinstance(statistics, dict):
+        raise CorruptRuntimeState(
+            RuntimeStateDiagnostic(
+                "INVALID_PERFORMANCE_DERIVED",
+                "performance_statistics.statistics must be an object",
+            )
+        )
+
+
 def validate_runtime_state(state: Mapping[str, Any]) -> dict[str, Any]:
     working = migrate_runtime_state(state)
 
@@ -532,6 +568,9 @@ def validate_runtime_state(state: Mapping[str, Any]) -> dict[str, Any]:
 
     # Phase 10 task retry state.
     _validate_task_retry_state(working.get("task_retry_state", {}))
+
+    # Phase 11 empirical model-intelligence state.
+    _validate_performance_statistics(working.get("performance_statistics", {}))
 
     return working
 
