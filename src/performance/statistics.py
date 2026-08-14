@@ -31,6 +31,7 @@ class ModelRoleStatistics:
     role: str
     # Quality counters (MODEL_QUALITY attribution only).
     attempts: int = 0
+    successful_outputs: int = 0
     first_pass_accepted: int = 0
     accepted: int = 0
     rejected: int = 0
@@ -59,6 +60,9 @@ class ModelRoleStatistics:
     def first_pass_rate(self) -> float | None:
         return safe_rate(self.first_pass_accepted, self.attempts)
 
+    def successful_output_rate(self) -> float | None:
+        return safe_rate(self.successful_outputs, self.attempts)
+
     def acceptance_rate(self) -> float | None:
         return safe_rate(self.accepted, self.attempts)
 
@@ -73,6 +77,7 @@ class ModelRoleStatistics:
             "model_id": self.model_id,
             "role": self.role,
             "attempts": self.attempts,
+            "successful_outputs": self.successful_outputs,
             "first_pass_accepted": self.first_pass_accepted,
             "accepted": self.accepted,
             "rejected": self.rejected,
@@ -97,6 +102,7 @@ class ModelRoleStatistics:
             "estimated_cost_sum": self.estimated_cost_sum,
             "unknown_cost_count": self.unknown_cost_count,
             "first_pass_rate": self.first_pass_rate(),
+            "successful_output_rate": self.successful_output_rate(),
             "acceptance_rate": self.acceptance_rate(),
             "repair_success_rate": self.repair_success_rate(),
             "average_latency_seconds": self.average_latency_seconds(),
@@ -117,6 +123,7 @@ class ModelRoleDimensionalStatistics:
     project_id: str
     language_framework: str
     attempts: int = 0
+    successful_outputs: int = 0
     first_pass_accepted: int = 0
     accepted: int = 0
     rejected: int = 0
@@ -133,6 +140,9 @@ class ModelRoleDimensionalStatistics:
     def first_pass_rate(self) -> float | None:
         return safe_rate(self.first_pass_accepted, self.attempts)
 
+    def successful_output_rate(self) -> float | None:
+        return safe_rate(self.successful_outputs, self.attempts)
+
     def acceptance_rate(self) -> float | None:
         return safe_rate(self.accepted, self.attempts)
 
@@ -145,6 +155,7 @@ class ModelRoleDimensionalStatistics:
             "project_id": self.project_id,
             "language_framework": self.language_framework,
             "attempts": self.attempts,
+            "successful_outputs": self.successful_outputs,
             "first_pass_accepted": self.first_pass_accepted,
             "accepted": self.accepted,
             "rejected": self.rejected,
@@ -158,6 +169,7 @@ class ModelRoleDimensionalStatistics:
             "repairs_resolved": self.repairs_resolved,
             "cross_model_repairs": self.cross_model_repairs,
             "first_pass_rate": self.first_pass_rate(),
+            "successful_output_rate": self.successful_output_rate(),
             "acceptance_rate": self.acceptance_rate(),
         }
 

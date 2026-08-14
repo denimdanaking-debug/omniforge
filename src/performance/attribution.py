@@ -6,7 +6,7 @@ from __future__ import annotations
 from enum import StrEnum
 
 from src.recovery.failure_classification import FailureClassification
-from src.telemetry.outcomes import OutcomeAttribution, TaskOutcome
+from src.telemetry.outcomes import OutcomeAttribution, OutcomeKind, TaskOutcome
 
 
 class PerformanceAttribution(StrEnum):
@@ -37,7 +37,15 @@ def attribution_from_failure_classification(
 
 
 def attribution_from_task_outcome(outcome: TaskOutcome) -> PerformanceAttribution:
-    """Map a normalized task outcome to a performance attribution."""
+    """Map a normalized task outcome to a performance attribution.
+
+    Successful model outputs are model-quality observations even though their
+    attribution flag is NONE, because the success itself is a positive model
+    learning signal.  Only failures with explicit model attribution count as
+    model-quality failures; infrastructure/system failures route elsewhere.
+    """
+    if outcome.kind == OutcomeKind.SUCCESS:
+        return PerformanceAttribution.MODEL_QUALITY
     if outcome.attribution == OutcomeAttribution.MODEL:
         return PerformanceAttribution.MODEL_QUALITY
     if outcome.attribution == OutcomeAttribution.PROVIDER:

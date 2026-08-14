@@ -14,21 +14,42 @@ class PerformanceLedger:
     """Immutable source-of-truth ledger of performance events.
 
     Events are append-only. Corrections are represented as new events, never by
-    mutating existing records. Duplicate events (by deterministic event_id) are
-    rejected so replay after restart is idempotent.
+    mutating existing records. Replay is idempotent: the same ``event_id`` with
+    the same canonical fingerprint is a no-op, while the same ``event_id`` with
+    a different fingerprint fails closed.
     """
 
     events: tuple[PerformanceEvent, ...] = ()
     schema_version: str = "1.0.0"
 
+    def _verify_event_fingerprint(self, event: PerformanceEvent) -> None:
+        expected = performance_event_fingerprint(event)
+        if event.event_fingerprint != expected:
+            raise ValueError(
+                f"event fingerprint mismatch for {event.event_id}: "
+                f"stored={event.event_fingerprint}, expected={expected}"
+            )
+
     def append(self, event: PerformanceEvent) -> PerformanceLedger:
         """Return a new ledger with ``event`` appended.
 
+        Exact replay (same ``event_id`` and same fingerprint) returns the
+        unchanged ledger.  A fingerprint collision fails closed.
+
         Raises:
-            ValueError: if an event with the same ``event_id`` is already present.
+            ValueError: if the event fingerprint is forged/stale or if the same
+            ``event_id`` exists with a different fingerprint.
         """
-        if any(e.event_id == event.event_id for e in self.events):
-            raise ValueError(f"duplicate event_id: {event.event_id}")
+        self._verify_event_fingerprint(event)
+        existing_by_id = {e.event_id: e for e in self.events}
+        existing = existing_by_id.get(event.event_id)
+        if existing is not None:
+            if existing.event_fingerprint == event.event_fingerprint:
+                return self
+            raise ValueError(
+                f"event_id collision for {event.event_id}: "
+                f"existing fingerprint differs from appended event"
+            )
         return PerformanceLedger(
             events=self.events + (event,),
             schema_version=self.schema_version,
@@ -37,19 +58,41 @@ class PerformanceLedger:
     def append_all(self, events: tuple[PerformanceEvent, ...]) -> PerformanceLedger:
         """Return a new ledger with multiple events appended atomically.
 
+        Validates every fingerprint and detects collisions (against existing
+        events and within the batch) before appending.  Exact duplicates are
+        idempotent; conflicting duplicates fail the entire batch.
+
         Raises:
-            ValueError: if any event_id collides with an existing event or another
-            event in the batch.
+            ValueError: if any fingerprint is forged/stale or if any event_id
+            collides with a different fingerprint.
         """
-        seen: set[str] = set()
-        for event in self.events:
-            seen.add(event.event_id)
+        existing_by_id = {e.event_id: e for e in self.events}
+        new_events: list[PerformanceEvent] = []
+        batch_seen: dict[str, PerformanceEvent] = {}
+
         for event in events:
-            if event.event_id in seen:
-                raise ValueError(f"duplicate event_id: {event.event_id}")
-            seen.add(event.event_id)
+            self._verify_event_fingerprint(event)
+            existing = existing_by_id.get(event.event_id)
+            if existing is not None:
+                if existing.event_fingerprint == event.event_fingerprint:
+                    continue
+                raise ValueError(
+                    f"event_id collision for {event.event_id}: "
+                    f"existing fingerprint differs from batch event"
+                )
+            prior_batch = batch_seen.get(event.event_id)
+            if prior_batch is not None:
+                if prior_batch.event_fingerprint == event.event_fingerprint:
+                    continue
+                raise ValueError(
+                    f"event_id collision within batch for {event.event_id}: "
+                    f"conflicting fingerprints"
+                )
+            batch_seen[event.event_id] = event
+            new_events.append(event)
+
         return PerformanceLedger(
-            events=self.events + events,
+            events=self.events + tuple(new_events),
             schema_version=self.schema_version,
         )
 

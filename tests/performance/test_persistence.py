@@ -109,7 +109,11 @@ class TestPerformanceStateSerialization:
     def test_no_secrets_in_state(self, base_time: datetime.datetime) -> None:
         event = _event("e1", base_time)
         event = PerformanceEvent.from_dict(
-            {**event.to_dict(), "originating_ids": {"api_key": "sk-live-12345"}}
+            {
+                **event.to_dict(),
+                "originating_ids": {"api_key": "sk-live-12345"},
+                "event_fingerprint": "",
+            }
         )
         ledger = PerformanceLedger().append(event)
         state = performance_state_to_dict(ledger)

@@ -17,6 +17,7 @@ from src.performance import (
     event_identity,
     performance_event_fingerprint,
 )
+from src.performance.event import thaw_json_value
 from src.security.redaction import contains_secret
 
 
@@ -123,6 +124,56 @@ class TestPerformanceEventImmutability:
         )
         summary["exit_status"] = 99
         assert event.validation_result_summary["exit_status"] == 1
+
+    def test_nested_mutation_is_blocked(self, base_time: datetime.datetime) -> None:
+        summary = {"validator": {"failures": ["a"]}}
+        event = PerformanceEvent.from_dict(
+            {**_event(timestamp=base_time).to_dict(), "validation_result_summary": summary}
+        )
+        with pytest.raises((TypeError, AttributeError)):
+            event.validation_result_summary["validator"]["failures"].append("b")
+
+    def test_mutating_original_nested_list_after_creation_does_not_affect_event(
+        self, base_time: datetime.datetime
+    ) -> None:
+        summary = {"validator": {"failures": ["a"]}}
+        event = PerformanceEvent.from_dict(
+            {**_event(timestamp=base_time).to_dict(), "validation_result_summary": summary}
+        )
+        summary["validator"]["failures"].append("b")
+        assert list(event.validation_result_summary["validator"]["failures"]) == ["a"]
+
+    def test_deeply_nested_structures_frozen(self, base_time: datetime.datetime) -> None:
+        summary = {"a": {"b": [{"c": [1, 2, {"d": "e"}]}]}}
+        event = PerformanceEvent.from_dict(
+            {**_event(timestamp=base_time).to_dict(), "validation_result_summary": summary}
+        )
+        assert thaw_json_value(event.validation_result_summary) == summary
+        with pytest.raises((TypeError, AttributeError)):
+            event.validation_result_summary["a"]["b"][0]["c"].append(3)
+
+    def test_round_trip_preserves_nested_content(self, base_time: datetime.datetime) -> None:
+        summary = {"top": {"list": [1, 2, {"nested": "value"}]}}
+        event = PerformanceEvent.from_dict(
+            {**_event(timestamp=base_time).to_dict(), "validation_result_summary": summary}
+        )
+        restored = PerformanceEvent.from_dict(event.to_dict())
+        assert event.to_dict()["validation_result_summary"] == summary
+        assert restored.to_dict()["validation_result_summary"] == summary
+
+    def test_fingerprint_invariant_to_nested_dict_insertion_order(
+        self, base_time: datetime.datetime
+    ) -> None:
+        summary_a = {"z": 1, "a": {"y": 2, "x": 3}}
+        summary_b = {"a": {"x": 3, "y": 2}, "z": 1}
+        base = _event(event_id="e1", timestamp=base_time).to_dict()
+        e1 = PerformanceEvent.from_dict(
+            {**base, "validation_result_summary": summary_a, "event_fingerprint": ""}
+        )
+        e2 = PerformanceEvent.from_dict(
+            {**base, "validation_result_summary": summary_b, "event_fingerprint": ""}
+        )
+        assert e1.event_fingerprint == e2.event_fingerprint
 
 
 class TestEventIdentity:

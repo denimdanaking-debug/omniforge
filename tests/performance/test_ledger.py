@@ -65,16 +65,71 @@ class TestPerformanceLedger:
         assert len(ledger.events) == 0
         assert len(ledger2.events) == 1
 
-    def test_duplicate_rejected(self, base_time: datetime.datetime) -> None:
+    def test_exact_duplicate_is_idempotent(self, base_time: datetime.datetime) -> None:
         event = _event(event_id="e1", timestamp=base_time)
         ledger = PerformanceLedger().append(event)
-        with pytest.raises(ValueError):
-            ledger.append(event)
+        ledger2 = ledger.append(event)
+        assert ledger2 is ledger
+        assert len(ledger2.events) == 1
 
-    def test_append_all_rejects_intra_batch_duplicate(self, base_time: datetime.datetime) -> None:
+    def test_same_id_different_fingerprint_fails_closed(self, base_time: datetime.datetime) -> None:
+        e1 = _event(event_id="e1", timestamp=base_time, usage=Usage(input_tokens=1))
+        e2 = _event(event_id="e1", timestamp=base_time, usage=Usage(input_tokens=2))
+        ledger = PerformanceLedger().append(e1)
+        with pytest.raises(ValueError, match="collision"):
+            ledger.append(e2)
+
+    def test_append_all_exact_duplicates_are_idempotent(self, base_time: datetime.datetime) -> None:
         event = _event(event_id="e1", timestamp=base_time)
-        with pytest.raises(ValueError):
-            PerformanceLedger().append_all((event, event))
+        ledger = PerformanceLedger().append_all((event, event))
+        assert len(ledger.events) == 1
+
+    def test_append_all_conflicting_intra_batch_duplicate_fails(
+        self, base_time: datetime.datetime
+    ) -> None:
+        e1 = _event(event_id="e1", timestamp=base_time, usage=Usage(input_tokens=1))
+        e2 = _event(event_id="e1", timestamp=base_time, usage=Usage(input_tokens=2))
+        with pytest.raises(ValueError, match="collision"):
+            PerformanceLedger().append_all((e1, e2))
+
+    def test_append_rejects_forged_fingerprint(self, base_time: datetime.datetime) -> None:
+        event = PerformanceEvent.from_dict(
+            {
+                **_event(event_id="e1", timestamp=base_time).to_dict(),
+                "event_fingerprint": "forged",
+            }
+        )
+        with pytest.raises(ValueError, match="fingerprint mismatch"):
+            PerformanceLedger().append(event)
+
+    def test_append_all_exact_duplicate_plus_new_event(self, base_time: datetime.datetime) -> None:
+        e1 = _event(event_id="e1", timestamp=base_time)
+        e2 = _event(event_id="e2", timestamp=base_time)
+        ledger = PerformanceLedger().append(e1).append_all((e1, e2))
+        assert len(ledger.events) == 2
+        assert ledger.has_event("e1")
+        assert ledger.has_event("e2")
+
+    def test_append_all_collision_leaves_ledger_unchanged(
+        self, base_time: datetime.datetime
+    ) -> None:
+        e1 = _event(event_id="e1", timestamp=base_time, usage=Usage(input_tokens=1))
+        e2 = _event(event_id="e2", timestamp=base_time)
+        e1_modified = _event(event_id="e1", timestamp=base_time, usage=Usage(input_tokens=2))
+        ledger = PerformanceLedger().append(e1)
+        with pytest.raises(ValueError, match="collision"):
+            ledger.append_all((e2, e1_modified))
+        assert len(ledger.events) == 1
+        assert ledger.events[0].event_id == "e1"
+        assert ledger.events[0].usage.input_tokens == 1
+
+    def test_serialize_restart_replay_no_duplicate(self, base_time: datetime.datetime) -> None:
+        event = _event(event_id="e1", timestamp=base_time)
+        ledger = PerformanceLedger().append(event)
+        reloaded = PerformanceLedger.from_dict(ledger.to_dict())
+        replayed = reloaded.append(event)
+        assert replayed == reloaded
+        assert len(replayed.events) == 1
 
     def test_has_event(self, base_time: datetime.datetime) -> None:
         event = _event(event_id="e1", timestamp=base_time)
@@ -108,6 +163,7 @@ class TestPerformanceLedger:
             {
                 **_event(event_id="e1", timestamp=base_time).to_dict(),
                 "originating_ids": {"api_key": sentinel},
+                "event_fingerprint": "",
             }
         )
         ledger = PerformanceLedger().append(event)
@@ -132,12 +188,3 @@ class TestPerformanceLedger:
         ledger = PerformanceLedger().append(event)
         reloaded = PerformanceLedger.from_dict(ledger.to_dict())
         assert reloaded == ledger
-
-    def test_same_id_different_fingerprint_fails_closed(self, base_time: datetime.datetime) -> None:
-        e1 = _event(event_id="e1", timestamp=base_time, usage=Usage(input_tokens=1))
-        e2 = _event(event_id="e1", timestamp=base_time, usage=Usage(input_tokens=2))
-        assert e1.event_id == e2.event_id
-        assert e1.event_fingerprint != e2.event_fingerprint
-        ledger = PerformanceLedger().append(e1)
-        with pytest.raises(ValueError):
-            ledger.append(e2)

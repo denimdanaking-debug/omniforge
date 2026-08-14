@@ -113,6 +113,11 @@ class StatisticsBuilder:
         # quality may affect acceptance/failure/repair/authority quality stats.
         if self._is_model_quality_event(event):
             stats = replace(stats, attempts=stats.attempts + 1)
+            # Model output success is measured by outcome category, not by the
+            # authoritative integration acceptance flag.
+            if event.outcome_category is OutcomeCategory.SUCCESS:
+                stats = replace(stats, successful_outputs=stats.successful_outputs + 1)
+            # ``accepted`` is reserved for canonical integration acceptance.
             if event.acceptance_status is AcceptanceStatus.ACCEPTED:
                 stats = replace(stats, accepted=stats.accepted + 1)
             elif event.acceptance_status is AcceptanceStatus.REJECTED:
@@ -172,6 +177,8 @@ class StatisticsBuilder:
             language_framework=event.language_framework or "unknown",
         )
         stats = replace(stats, attempts=stats.attempts + 1)
+        if event.outcome_category is OutcomeCategory.SUCCESS:
+            stats = replace(stats, successful_outputs=stats.successful_outputs + 1)
         if event.acceptance_status is AcceptanceStatus.ACCEPTED:
             stats = replace(stats, accepted=stats.accepted + 1)
         elif event.acceptance_status is AcceptanceStatus.REJECTED:
@@ -330,7 +337,9 @@ class StatisticsBuilder:
             project_id=event.project_id,
         )
         stats = replace(stats, attempts=stats.attempts + 1)
-        if event.acceptance_status is AcceptanceStatus.ACCEPTED:
+        # Context strategy "acceptance" reflects successful context construction,
+        # not authoritative integration acceptance.
+        if event.outcome_category is OutcomeCategory.SUCCESS:
             stats = replace(stats, accepted=stats.accepted + 1)
         if event.first_pass:
             stats = replace(stats, first_pass_accepted=stats.first_pass_accepted + 1)

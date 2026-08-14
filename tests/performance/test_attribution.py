@@ -63,10 +63,10 @@ def _default_subtype(category: FailureCategory) -> Any:
 
 
 class TestAttributionFromTaskOutcome:
-    def test_success_is_not_model_quality(self) -> None:
+    def test_success_is_model_quality(self) -> None:
         outcome = successful_outcome()
-        assert attribution_from_task_outcome(outcome) is PerformanceAttribution.UNKNOWN
-        assert not affects_model_quality(attribution_from_task_outcome(outcome))
+        assert attribution_from_task_outcome(outcome) is PerformanceAttribution.MODEL_QUALITY
+        assert affects_model_quality(attribution_from_task_outcome(outcome))
 
     def test_provider_failure_is_provider_route(self) -> None:
         outcome = provider_failure("outage")

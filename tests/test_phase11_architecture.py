@@ -174,6 +174,7 @@ class TestNoSecretsInLedger:
             {
                 **_event(event_id="e1", timestamp=base_time).to_dict(),
                 "originating_ids": {"api_key": SENTINEL},
+                "event_fingerprint": "",
             }
         )
         ledger = PerformanceLedger().append(event)

@@ -179,10 +179,15 @@ def emit_from_task_outcome(
     originating_ids: dict[str, str] | None = None,
     sequence: int = 0,
 ) -> PerformanceEvent:
-    """Build a performance event from a normalized TaskOutcome."""
+    """Build a performance event from a normalized TaskOutcome.
+
+    A successful task output records ``OutcomeCategory.SUCCESS`` but remains
+    ``AcceptanceStatus.PENDING`` until canonical integration acceptance.
+    """
     outcome_category = _outcome_category_from_task_outcome(outcome)
+    # Model/task output success is not authoritative integration acceptance.
     acceptance = (
-        AcceptanceStatus.ACCEPTED
+        AcceptanceStatus.PENDING
         if outcome.kind is OutcomeKind.SUCCESS
         else AcceptanceStatus.REJECTED
     )
@@ -375,7 +380,8 @@ def emit_from_context_outcome(
         outcome_category=OutcomeCategory(outcome.failure_category)
         if outcome.failure_category
         else OutcomeCategory.SUCCESS,
-        acceptance_status=AcceptanceStatus.ACCEPTED
+        # Context outcome acceptance is not authoritative integration acceptance.
+        acceptance_status=AcceptanceStatus.PENDING
         if outcome.accepted
         else AcceptanceStatus.REJECTED,
         first_pass=not outcome.repair_required,

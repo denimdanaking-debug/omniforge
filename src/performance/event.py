@@ -15,6 +15,53 @@ from src.recovery.clock import ensure_aware, isoformat
 from src.security.redaction import redact
 
 
+def _canonical_sort_key(value: Any) -> str:
+    """Stable string key for sorting frozen values deterministically.
+
+    The value is first thawed to ordinary JSON-safe dict/list/primitives so
+    that frozen representations such as ``MappingProxyType`` or tuples do not
+    depend on their Python repr.
+    """
+    try:
+        return json.dumps(
+            thaw_json_value(value), sort_keys=True, separators=(",", ":"), default=str
+        )
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def freeze_json_value(value: Any) -> Any:
+    """Recursively copy and freeze a JSON-like value.
+
+    Mappings become read-only mappings, sequences become tuples, and sets are
+    represented as deterministic sorted tuples.  Primitives are returned
+    unchanged.  The result contains no references to mutable caller-owned
+    objects.
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType({k: freeze_json_value(v) for k, v in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(freeze_json_value(v) for v in value)
+    if isinstance(value, (set, frozenset)):
+        return tuple(sorted((freeze_json_value(v) for v in value), key=_canonical_sort_key))
+    if isinstance(value, (str, int, float, bool, type(None))):
+        return value
+    # Fallback: leave unknown types as-is.  They remain part of the frozen
+    # snapshot because the surrounding mapping/sequence was replaced.
+    return value
+
+
+def thaw_json_value(value: Any) -> Any:
+    """Inverse of ``freeze_json_value``: return normal JSON-safe dict/list/primitives."""
+    if isinstance(value, Mapping):
+        return {k: thaw_json_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [thaw_json_value(v) for v in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted([thaw_json_value(v) for v in value], key=_canonical_sort_key)
+    return value
+
+
 class PerformanceEventType(StrEnum):
     """Canonical performance event types."""
 
@@ -260,19 +307,19 @@ class PerformanceEvent:
             raise ValueError("provider_wait_seconds must be non-negative")
         if self.time_to_accepted_seconds is not None and self.time_to_accepted_seconds < 0:
             raise ValueError("time_to_accepted_seconds must be non-negative")
-        # Deep immutability: freeze any nested mappings so historical ledger
-        # contents cannot be mutated after append.
+        # Deep immutability: recursively freeze nested mappings/sequences so
+        # historical ledger contents cannot be mutated after append.
         object.__setattr__(
             self,
             "validation_result_summary",
-            MappingProxyType(dict(self.validation_result_summary)),
+            freeze_json_value(self.validation_result_summary),
         )
         object.__setattr__(
             self,
             "review_finding_dispositions",
-            MappingProxyType(dict(self.review_finding_dispositions)),
+            freeze_json_value(self.review_finding_dispositions),
         )
-        object.__setattr__(self, "originating_ids", MappingProxyType(dict(self.originating_ids)))
+        object.__setattr__(self, "originating_ids", freeze_json_value(self.originating_ids))
         if not self.event_fingerprint:
             object.__setattr__(self, "event_fingerprint", performance_event_fingerprint(self))
 
@@ -298,7 +345,7 @@ class PerformanceEvent:
             "acceptance_status": self.acceptance_status.value,
             "first_pass": self.first_pass,
             "plan_valid": self.plan_valid,
-            "validation_result_summary": dict(self.validation_result_summary),
+            "validation_result_summary": thaw_json_value(self.validation_result_summary),
             "repair_metadata": self.repair_metadata.to_dict() if self.repair_metadata else None,
             "review_finding_dispositions": {
                 k: v.value for k, v in sorted(self.review_finding_dispositions.items())
@@ -366,11 +413,9 @@ class PerformanceEvent:
             ),
             first_pass=data.get("first_pass"),
             plan_valid=data.get("plan_valid"),
-            validation_result_summary=MappingProxyType(
-                dict(data.get("validation_result_summary", {}))
-            ),
+            validation_result_summary=data.get("validation_result_summary", {}),
             repair_metadata=repair_metadata,
-            review_finding_dispositions=MappingProxyType(review_dispositions),
+            review_finding_dispositions=review_dispositions,
             authority_adherence=authority_adherence,
             latency_seconds=_optional_float(data.get("latency_seconds")),
             provider_wait_seconds=_optional_float(data.get("provider_wait_seconds")),
@@ -380,7 +425,7 @@ class PerformanceEvent:
             time_to_accepted_seconds=_optional_float(data.get("time_to_accepted_seconds")),
             task_difficulty=data.get("task_difficulty"),
             evidence_refs=tuple(data.get("evidence_refs", [])),
-            originating_ids=MappingProxyType(dict(data.get("originating_ids", {}))),
+            originating_ids=data.get("originating_ids", {}),
             attribution=str(data.get("attribution", "unknown")),
             event_fingerprint=str(data.get("event_fingerprint", "")),
         )
